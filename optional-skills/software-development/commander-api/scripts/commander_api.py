@@ -82,6 +82,33 @@ SHORTCUTS = {
         [("project", True)],
         "Full preflight report before dispatching a sprint",
     ),
+    "home": ("/api/home", [], [], "Cross-project rollup: running/awaiting-UAT/backlog counts"),
+    # Deliberately NOT named "*status*" — that name collides with the
+    # `status` command for attention and was directly implicated in this
+    # command's `state` field being misread as live-running state (it's
+    # actually GitHub-label-derived; see the injected _warning below and
+    # SKILL.md Pitfalls). Ticket-column breakdown only; use `status` for
+    # "is it running".
+    "sprint_columns": (
+        "/api/sprint-nav-status",
+        [],
+        [("repo", True)],  # API marks this optional but omitting it silently
+        # returns an arbitrary project's data instead of erroring — require
+        # it here so that footgun can't happen through this script.
+        "Ticket-column breakdown for one project's latest tracked sprint (repo must be full 'owner/repo') — NOT a live-running signal, use `status` for that",
+    ),
+    "rerun_preview": (
+        "/api/sprints/{sprint_label}/rerun-preview",
+        ["sprint_label"],
+        [("project", True)],
+        "Preview what a re-run of a sprint would do (SAFE, no side effects)",
+    ),
+    "milestones": (
+        "/api/projects/{slug}/milestones",
+        ["slug"],
+        [],
+        "List milestones + which one is active (bare repo name) — check before plan_next",
+    ),
 }
 
 
@@ -157,6 +184,45 @@ def request(base_url, token, method, path, body=None, query=None, timeout=20):
     return result
 
 
+def status_overview(base_url, token):
+    """One-shot cross-project sprint status, sourced entirely from
+    GET /api/home's `projects` array — the one place Commander's own
+    dashboard computes a live, authoritative per-project `status`
+    (idle/uat-pending/running) plus the real project-wide backlog count.
+
+    Earlier versions of this command used /api/sprint-nav-status per
+    project instead. Don't go back to that: its `state` field is derived
+    from GitHub issue labels ("has a Sprint N Executive Summary issue been
+    posted"), cached 30s, and answers "has this sprint been formally
+    closed out" — NOT "is an agent actively working right now". It can
+    read "running" for a project that finished its actual work hours ago
+    and just hasn't been through the finish step yet, which reads as a
+    false positive against the real running state /api/home reports.
+    Similarly nav-status's `columns.backlog` is the tiny in-sprint kanban
+    backlog column (0-2 tickets), not the project's real untriaged
+    backlog pool (dozens) — /api/home's `backlog_count` is the right one.
+    """
+    status, home_body = _fetch_raw(base_url, token, "GET", "/api/home")
+    if status != 200:
+        return {"error": "could not fetch /api/home", "status": status, "body": home_body}
+
+    results = []
+    for proj in home_body.get("projects", []):
+        entry = {
+            "repo": proj.get("repo"),
+            "status": proj.get("status"),  # "idle" | "uat-pending" | "running"
+            "uat_count": proj.get("uat_count"),
+            "backlog_open": proj.get("backlog_count"),
+            "last_sprint_num": (proj.get("last_sprint") or {}).get("sprint_num"),
+        }
+        sprint_running = proj.get("sprint_running")
+        if sprint_running:
+            entry["running_sprint_label"] = sprint_running.get("label")
+            entry["running_elapsed_sec"] = sprint_running.get("elapsed_sec")
+        results.append(entry)
+    return {"projects": results}
+
+
 def stream(base_url, token, path, max_seconds):
     url = base_url.rstrip("/") + "/" + path.lstrip("/")
     headers = {"Accept": "text/event-stream"}
@@ -198,6 +264,11 @@ def main():
         for qname, required in query_params:
             sp.add_argument(f"--{qname}", required=required, default=None)
 
+    sub.add_parser(
+        "status",
+        help="THE live status command — running/idle/uat-pending + UAT/backlog counts, every project, one call",
+    )
+
     sp = sub.add_parser("spec", help="Dump Commander's live OpenAPI schema")
     sp.add_argument("--path", default="", help="Optional path filter substring")
 
@@ -217,6 +288,10 @@ def main():
 
     args = p.parse_args()
     base_url = f"http://{args.host}:{args.port}"
+
+    if args.cmd == "status":
+        print(json.dumps(status_overview(base_url, args.token), indent=2))
+        return
 
     if args.cmd == "spec":
         status, parsed = _fetch_raw(base_url, args.token, "GET", "/openapi.json")
@@ -256,6 +331,17 @@ def main():
         path = path.replace(f"{{{param}}}", getattr(args, param))
     query = {qname: getattr(args, qname) for qname, _ in query_params}
     result = request(base_url, args.token, "GET", path, query=query)
+    if args.cmd == "sprint_columns" and isinstance(result.get("body"), dict):
+        # Baked into the actual response, not just the docs, so it still
+        # surfaces even if a conversation is working from stale skill
+        # content and never re-reads the current SKILL.md — this exact
+        # field was misread as live-running status in a real bad reply.
+        result["body"]["_warning"] = (
+            "state/columns here are derived from GitHub issue labels (has a "
+            "Sprint N Executive Summary issue been posted), cached ~30s. "
+            "This is NOT whether an agent is running right now. Use the "
+            "`status` command for live running/idle/uat-pending state."
+        )
     print(json.dumps(result, indent=2))
 
 

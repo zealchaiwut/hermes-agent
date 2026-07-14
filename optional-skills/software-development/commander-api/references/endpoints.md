@@ -109,7 +109,7 @@ routes, `repo` (stripped of the `owner/` prefix) for path-param routes.
 | SAFE | GET | `/api/issues` | List issues (shortcut: `issues`) |
 | WRITE | POST | `/api/issues/{issue_id}/approve` \| `/reject` \| `/close` | Issue lifecycle actions |
 | SAFE | GET | `/api/issues/{issue_id}/test-report` | Tester report for issue |
-| WRITE | POST | `/api/issues/{issue_id}/sprint-label` | Set sprint label on issue |
+| WRITE | POST | `/api/issues/{issue_id}/sprint-label` | Set sprint label on issue — **no project param** (acts on Commander's ambient active project, verified via source; unsafe to assume for a specific project) |
 | SAFE | POST | `/api/projects/{owner}/{repo}/backlog/cleanup-preview` \| `/triage-apply` (preview mode) | Preview backlog cleanup/triage |
 | WRITE | POST | `/api/projects/{owner}/{repo}/backlog/triage` | Run backlog triage (applies) |
 | WRITE | POST | `/api/tickets/{issue_id}/approve` | Approve single ticket |
@@ -146,7 +146,7 @@ routes, `repo` (stripped of the `owner/` prefix) for path-param routes.
 | SAFE | GET | `/api/sprints` | List sprints (shortcut: `sprints`) |
 | SAFE | GET | `/api/sprints/goal` \| `/order` \| `/pending-signoff` \| `/running-all` | Reads |
 | WRITE | POST | `/api/sprints/goal` \| `/order` | Set goal/order |
-| HIGH-RISK | POST | `/api/sprints/plan-next` | Plan the next sprint |
+| WRITE | POST | `/api/sprints/plan-next` | Draft next sprint from the active milestone's backlog, capacity-aware — properly project-scoped via `project` body field (full `owner/repo`); requires an active GitHub milestone or returns `no_milestone` (check `milestones <repo>` first) |
 | SAFE | GET | `/api/sprints/{label}/dispatch-log` \| `/preview-dag` \| `/dag-order-preview` | Preview reads |
 | WRITE | POST | `/api/sprints/create` | Create sprint |
 | WRITE | POST | `/api/sprints/{label}/rename` \| `/tickets/reorder` \| `/plan` | Sprint edits |
@@ -178,7 +178,7 @@ routes, `repo` (stripped of the `owner/` prefix) for path-param routes.
 | SAFE | GET | `/api/sprints/{label}/state-full` \| `/issue/{n}/log` \| `/state-timing` | Detail reads |
 | SAFE (SSE) | GET | `/api/sprints/{label}/live/stream` | Live sprint stream |
 | SAFE | GET | `/api/sprints/{label}/live` | Live sprint snapshot |
-| SAFE | GET | `/api/sprint-nav-status` \| `/sprint-progress` \| `/sprint-nav-summary` | Nav reads (shortcut for progress: `sprint_progress`) |
+| SAFE | GET | `/api/sprint-nav-status` \| `/sprint-progress` \| `/sprint-nav-summary` | Nav reads (shortcuts: `sprint_columns` for nav-status, `sprint_progress` for progress) — `sprint-nav-status`'s `state` is GitHub-label-derived, not live-running; use `status`/`/api/home` for that |
 | SAFE | GET | `/api/sprint-status` \| `/sprint-summary` \| `/home` \| `/sprint-history` \| `/sprint-history-content` \| `/sprints/timeline` \| `/sprints/summaries` | Summary reads |
 | WRITE | POST | `/api/sprint-status` | Post status |
 
@@ -231,8 +231,8 @@ routes, `repo` (stripped of the `owner/` prefix) for path-param routes.
 | HIGH-RISK | POST | `/api/advisor/tick` | Advisor tick — costs LLM calls |
 | WRITE | POST | `/api/projects/{project}/advisor/suggestions/{id}/dismiss` \| `/accept` | Accept/dismiss suggestion |
 | SAFE | GET | `/api/projects/{project}/advisor/dismissed` | Dismissed suggestions |
-| SAFE | GET | `/api/sprint-planning/issues` | Candidate issues for planning |
-| WRITE | POST | `/api/sprint-planning/assign` | Assign issues to sprint |
+| SAFE | GET | `/api/sprint-planning/issues` | Candidate issues for planning — **no project param**, returns whichever project is Commander's ambient active one |
+| WRITE | POST | `/api/sprint-planning/assign` | Assign issue to sprint label — **no project param** (same ambient-project caveat as `/api/issues/{id}/sprint-label`; prefer `plan-next` for a specific project) |
 
 ## Brief / summary / changelog / docs
 
