@@ -132,6 +132,7 @@ are capped at 15 items so a single call can't blow the context budget.
 | `mis_sizing_flags <label> --project <repo>` | `GET .../mis-sizing-flags` | Pre-computed ticket mis-sizing flags |
 | `preflight <label> --project <repo>` | `GET .../preflight` | Full preflight report before dispatch |
 | `rerun_preview <label> --project <owner/repo>` | `GET .../rerun-preview` | Preview what re-running a sprint would do (SAFE) — needs full `owner/repo`, not bare name |
+| `milestones <repo>` | `GET /api/projects/{slug}/milestones` | List milestones + `active` one — check before `plan-next` |
 | `spec [--path <substr>]` | `GET /openapi.json` | Live schema — the source of truth if this doc drifts |
 | `stream <path> [--max-seconds N]` | any SSE route | Capped read of a live stream (default 20s) |
 | `call <METHOD> <path> [--json '<body>'] [--confirm]` | any of the ~155 routes | Escape hatch — see `references/endpoints.md` |
@@ -222,6 +223,42 @@ Note the full `owner/repo` form here — see the identifier quirk section.
 3. Relay state fields plainly; don't re-interpret `state`/`dag`/warnings
    into your own verdict.
 
+### Backlog → Sprint (project is idle, add its backlog/follow-up tickets)
+
+The trigger is usually "project X is idle, clean up/queue its backlog." Two
+real tools exist, and they are not equally safe across multiple projects —
+read the caveat before picking one.
+
+1. First confirm idle: `status` (or `nav_status --repo <owner/repo>`) — if
+   `state: "running"`, stop here and say so; Commander runs one sprint per
+   project at a time, nothing can be added until it finishes.
+2. **Auto-fill the next sprint from the backlog (preferred, multi-project
+   safe):** `plan_next` isn't a named shortcut (it's a write) — check
+   `milestones <repo>` first (bare repo name) and read the top-level
+   `active` field. If `active` is `null`, say so plainly and stop or ask
+   whether the user wants to set a milestone on GitHub first — this is a
+   real precondition in Commander's own planner (issue #861: "no active
+   milestone → nothing to plan"), not a skill limitation. If there is an
+   active milestone, confirm with the user, then
+   `call POST /api/sprints/plan-next --json '{"project": "<owner/repo>", "replace": false}' --confirm`.
+   Relay the returned `status` verbatim (`ok` / `no_milestone` / `empty` /
+   `conflict`) — each is a real, documented outcome, not an error to work
+   around. `conflict` means a pending-sign-off draft already exists; only
+   retry with `"replace": true` after the user explicitly says to discard
+   that existing draft.
+3. **Manually add one specific issue to a sprint — CAVEAT:** the only routes
+   for this (`POST /api/sprint-planning/assign`,
+   `POST /api/issues/{issue_id}/sprint-label`) take **no project parameter
+   at all** (verified by reading Commander's own source, not just the
+   OpenAPI spec) — they act on whatever project Commander's server
+   currently considers active, which this API gives no way to read or set.
+   With more than one tracked project this can silently label an issue in
+   the wrong repo. Only use these when you're already certain which
+   project is server-side-active (e.g. it's the only one with a UI session
+   open), and say that assumption out loud to the user. When unsure, use
+   `plan_next` instead (it takes an explicit project) or tell the user this
+   one needs the Commander UI directly.
+
 ### Ticket Creation / Backlog Triage
 
 1. Draft first, never post directly: `call POST /api/tickets/draft --json '{"description": "..."}' --confirm`
@@ -263,6 +300,12 @@ schema straight from Commander.
 - `pending-signoff` timed out during testing against a project with a lot
   of history — prefer `status`/`home` for awaiting-UAT counts instead of
   calling it per project.
+- `sprint-planning/assign` and `issues/{id}/sprint-label` have no project
+  parameter — verified in Commander's own source, not just the spec. Don't
+  treat them as safe for an arbitrary project; see Backlog → Sprint above.
+- `plan-next` requires an active GitHub milestone on the project (a real
+  precondition, not a bug) — check `milestones <repo>` first rather than
+  calling it blind and being confused by a `no_milestone` result.
 - Don't show the raw `terminal` command or JSON response in a status reply,
   don't fabricate illustrative/example data, don't explain API mechanics
   unprompted, and don't leave part of a multi-project question unanswered

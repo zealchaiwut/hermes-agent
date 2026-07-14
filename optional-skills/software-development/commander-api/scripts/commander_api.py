@@ -97,6 +97,12 @@ SHORTCUTS = {
         [("project", True)],
         "Preview what a re-run of a sprint would do (SAFE, no side effects)",
     ),
+    "milestones": (
+        "/api/projects/{slug}/milestones",
+        ["slug"],
+        [],
+        "List milestones + which one is active (bare repo name) — check before plan_next",
+    ),
 }
 
 
