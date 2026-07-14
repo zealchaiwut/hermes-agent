@@ -5845,6 +5845,65 @@ class DiscordAdapter(BasePlatformAdapter):
             logger.warning("[%s] send_clarify failed: %s", self.name, e)
             return SendResult(success=False, error=str(e))
 
+    async def send_journal_dev_todos(
+        self,
+        chat_id: str,
+        todos: list,
+        project: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send dev-category journal todos with per-todo [Approve] buttons.
+
+        Each todo gets its own message with a JournalApproveView.
+        Only users in the adapter's allowlist may click Approve (AC2).
+
+        ``todos`` is a list of dicts with keys: id, title, body.
+        ``project`` is the target repo in ``owner/repo`` format.
+        """
+        if not self._client or not DISCORD_AVAILABLE:
+            return SendResult(success=False, error="Not connected")
+
+        if not todos:
+            return SendResult(success=True, message_id="")
+
+        try:
+            target_id = chat_id
+            if metadata and metadata.get("thread_id"):
+                target_id = metadata["thread_id"]
+
+            channel = self._client.get_channel(int(target_id))
+            if not channel:
+                channel = await self._client.fetch_channel(int(target_id))
+
+            last_msg_id: str = ""
+            for todo in todos:
+                todo_id = str(todo.get("id") or "")
+                title = str(todo.get("title") or "")
+                body = str(todo.get("body") or "")
+                label_title = _truncate_discord_component_text(title, 200)
+                embed = discord.Embed(
+                    title=f"📋 Dev Todo: {label_title}",
+                    description=body[:4000] if body else "(no description)",
+                    color=discord.Color.blurple(),
+                )
+                embed.set_footer(text=f"id: {todo_id}")
+                view = JournalApproveView(
+                    todo_id=todo_id,
+                    title=title,
+                    body=body,
+                    project=project,
+                    allowed_user_ids=self._allowed_user_ids,
+                    allowed_role_ids=self._allowed_role_ids,
+                )
+                msg = await channel.send(embed=embed, view=view)
+                view._message = msg
+                last_msg_id = str(msg.id)
+
+            return SendResult(success=True, message_id=last_msg_id)
+        except Exception as exc:
+            logger.warning("[%s] send_journal_dev_todos failed: %s", self.name, exc)
+            return SendResult(success=False, error=str(exc))
+
     async def send_update_prompt(
         self, chat_id: str, prompt: str, default: str = "",
         session_key: str = "",
@@ -6830,7 +6889,7 @@ def _define_discord_view_classes() -> None:
     lazy install sets DISCORD_AVAILABLE=True but leaves the classes
     undefined, causing NameError on the first button interaction.
     """
-    global ExecApprovalView, SlashConfirmView, UpdatePromptView, ModelPickerView, ClarifyChoiceView
+    global ExecApprovalView, SlashConfirmView, UpdatePromptView, ModelPickerView, ClarifyChoiceView, JournalApproveView
 
     class ExecApprovalView(discord.ui.View):
         """
@@ -7761,6 +7820,104 @@ def _define_discord_view_classes() -> None:
                     await msg.edit(embed=embed, view=self)
                 except Exception:
                     pass
+
+    class JournalApproveView(discord.ui.View):
+        """Single-button [Approve] view for promoting a dev journal todo to the backlog.
+
+        One view instance is created per todo. Clicking [Approve]:
+          1. Auth-checks the clicker against the adapter's allowed users/roles.
+          2. Calls handle_journal_approve() to POST to Commander's /api/tickets/create.
+          3. Confirms in-channel with "✅ Ticket created: #<N>" or an error message.
+          4. Disables the button to prevent duplicate clicks.
+
+        Unauthorised clicks receive an ephemeral rejection reply (AC2).
+        """
+
+        def __init__(
+            self,
+            todo_id: str,
+            title: str,
+            body: str,
+            project: str,
+            allowed_user_ids: set,
+            allowed_role_ids: Optional[set] = None,
+        ):
+            super().__init__(timeout=_read_discord_prompt_timeout())
+            self.todo_id = todo_id
+            self.title = title
+            self.body = body
+            self.project = project
+            self.allowed_user_ids = allowed_user_ids
+            self.allowed_role_ids = allowed_role_ids or set()
+            self.resolved = False
+
+        def _check_auth(self, interaction: discord.Interaction) -> bool:
+            return _component_check_auth(
+                interaction, self.allowed_user_ids, self.allowed_role_ids
+            )
+
+        @discord.ui.button(label="Approve", style=discord.ButtonStyle.green)
+        async def approve(
+            self, interaction: discord.Interaction, button: discord.ui.Button
+        ):
+            if self.resolved:
+                await interaction.response.send_message(
+                    "This todo has already been approved.", ephemeral=True
+                )
+                return
+
+            if not self._check_auth(interaction):
+                await interaction.response.send_message(
+                    "You're not authorised to approve journal todos.", ephemeral=True
+                )
+                return
+
+            self.resolved = True
+            for child in self.children:
+                child.disabled = True
+
+            user_id = str(getattr(getattr(interaction, "user", None), "id", "unknown"))
+
+            try:
+                from services.hermes.journal_approve import handle_journal_approve
+                result = handle_journal_approve(
+                    todo_id=self.todo_id,
+                    title=self.title,
+                    body=self.body,
+                    project=self.project,
+                    user_id=user_id,
+                )
+            except Exception as exc:
+                logger.error("journal_approve error for todo=%s: %s", self.todo_id, exc)
+                result = {"success": False, "duplicate": False, "error": str(exc), "ticket_number": None}
+
+            if result.get("duplicate"):
+                reply = f"⚠️ Todo `{self.todo_id}` was already approved — no duplicate ticket created."
+            elif result.get("success"):
+                num = result.get("ticket_number")
+                reply = f"✅ Ticket created: #{num}" if num else "✅ Ticket created."
+            else:
+                reply = f"❌ Could not create ticket: {result.get('error', 'unknown error')}"
+
+            try:
+                await interaction.response.edit_message(content=reply, view=self)
+            except Exception:
+                try:
+                    await interaction.followup.send(content=reply, ephemeral=False)
+                except Exception:
+                    pass
+
+        async def on_timeout(self):
+            self.resolved = True
+            for child in self.children:
+                child.disabled = True
+            msg = getattr(self, "_message", None)
+            if msg:
+                try:
+                    await msg.edit(view=self)
+                except Exception:
+                    pass
+
 if DISCORD_AVAILABLE:
     _define_discord_view_classes()
 
