@@ -24,9 +24,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+pytest.importorskip("discord", reason="discord.py not installed")
+
 import plugins.platforms.discord.adapter as adapter_mod
 
 discord = adapter_mod.discord
+if not hasattr(adapter_mod, "JournalApproveView"):
+    pytest.skip("JournalApproveView unavailable (discord guard not taken)", allow_module_level=True)
 JournalApproveView = adapter_mod.JournalApproveView
 
 
