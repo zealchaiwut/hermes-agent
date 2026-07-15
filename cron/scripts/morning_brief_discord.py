@@ -145,28 +145,103 @@ def _build_message(brief_markdown: str) -> str:
     return f"Good morning! Here is your morning brief:\n\n{brief_markdown}"
 
 
+def _extract_fenced_segments(text: str) -> list[str]:
+    """Split ``text`` into segments for :func:`_split_into_chunks`.
+
+    Everything outside a fenced code block (``` ... ```) stays split one
+    line per segment (original behavior). A fenced code block — e.g. the
+    morning-brief todo section's monospace block — is kept as a single
+    multi-line segment so a later chunk boundary can never land inside it
+    and break Discord's rendering of the remaining fence. An unterminated
+    fence (no matching closing ```) falls back to per-line segments rather
+    than swallowing the rest of the text as one "atomic" block.
+    """
+    lines = text.split("\n")
+    segments: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if line.strip().startswith("```"):
+            j = i + 1
+            while j < n and not lines[j].strip().startswith("```"):
+                j += 1
+            if j < n:
+                segments.append("\n".join(lines[i : j + 1]))
+                i = j + 1
+                continue
+        segments.append(line)
+        i += 1
+    return segments
+
+
+def _split_fenced_block(segment: str, max_chars: int) -> list[str]:
+    """Hard-split an oversized fenced code block at ``max_chars`` boundaries.
+
+    ``segment`` includes its own opening/closing ``` lines. Each resulting
+    partial chunk is re-wrapped in its own ``` fence pair so every posted
+    message still renders monospace, even though the block had to be torn
+    across multiple Discord messages. Basically never triggered by a
+    realistic (12-25 item) todo list, but must not crash if it ever is.
+    """
+    inner_lines = segment.split("\n")[1:-1]  # drop the outer ``` fence lines
+    fence_overhead = len("```\n") + len("\n```")
+    budget = max(1, max_chars - fence_overhead)
+
+    chunks: list[str] = []
+    current = ""
+    for line in inner_lines:
+        while len(line) > budget:
+            if current:
+                chunks.append(f"```\n{current}\n```")
+                current = ""
+            chunks.append(f"```\n{line[:budget]}\n```")
+            line = line[budget:]
+
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > budget:
+            chunks.append(f"```\n{current}\n```")
+            current = line
+        else:
+            current = candidate
+
+    if current:
+        chunks.append(f"```\n{current}\n```")
+    return chunks
+
+
 def _split_into_chunks(text: str, max_chars: int = DISCORD_MAX_CHARS) -> list[str]:
     """Split text into chunks of at most max_chars.
 
-    Breaks only on newline boundaries — never mid-line — except when a
-    single line itself exceeds max_chars, in which case that line is
-    hard-split at max_chars boundaries.
+    Breaks only on segment boundaries — never mid-line, and never inside an
+    open fenced code block (see :func:`_extract_fenced_segments`) — except
+    when a single segment itself exceeds max_chars. A plain oversized line
+    is hard-split at max_chars boundaries (original behavior); an oversized
+    fenced block is hard-split and re-wrapped per chunk (see
+    :func:`_split_fenced_block`) so it still renders monospace.
     """
     chunks: list[str] = []
     current = ""
 
-    for line in text.split("\n"):
-        while len(line) > max_chars:
+    for segment in _extract_fenced_segments(text):
+        if len(segment) > max_chars:
             if current:
                 chunks.append(current)
                 current = ""
-            chunks.append(line[:max_chars])
-            line = line[max_chars:]
+            if segment.strip().startswith("```") and segment.count("\n") > 0:
+                chunks.extend(_split_fenced_block(segment, max_chars))
+                continue
+            remainder = segment
+            while len(remainder) > max_chars:
+                chunks.append(remainder[:max_chars])
+                remainder = remainder[max_chars:]
+            current = remainder
+            continue
 
-        candidate = f"{current}\n{line}" if current else line
+        candidate = f"{current}\n{segment}" if current else segment
         if len(candidate) > max_chars:
             chunks.append(current)
-            current = line
+            current = segment
         else:
             current = candidate
 

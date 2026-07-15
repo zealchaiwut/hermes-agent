@@ -29,22 +29,42 @@ Flags:
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s", stream=sys.stderr)
 logger = logging.getLogger(__name__)
 
+# Ensure the repo root is on sys.path so services.hermes.{todo_store,away_mode}
+# are importable whether this module is invoked directly (``python3
+# scripts/morning_brief_composer.py``) or imported as a package (tests, the
+# cron delivery script). Mirrors cron/scripts/morning_brief_discord.py's own
+# bootstrap.
+_REPO_ROOT = Path(__file__).parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 _BKK = ZoneInfo("Asia/Bangkok")
 
 _HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
 _CONTRACTS_DIR = _HERMES_HOME / "contracts"
+
+DEFAULT_BRIEF_RENDER_CONFIG_PATH = str(_REPO_ROOT / "config" / "brief_render.yaml")
+
+_DEFAULT_RENDER_CONFIG = {
+    "todo_section": {
+        "fields": {"glyph": True, "key": True, "text": True, "recency": True},
+        "text_max_chars": 32,
+        "header_format": "To-do · {count} open · /done <key>",
+    }
+}
 
 DEFAULT_JOURNAL_PATH = str(_CONTRACTS_DIR / "journal_brief.latest.json")
 DEFAULT_PERFCOACH_PATH = str(_CONTRACTS_DIR / "perfcoach_brief.latest.json")
@@ -89,6 +109,55 @@ def load_contract(path: str | Path) -> tuple[dict | None, str]:
         return None, f"stale: {stale_date}"
 
     return data, ""
+
+
+# ---------------------------------------------------------------------------
+# Render config (config/brief_render.yaml)
+# ---------------------------------------------------------------------------
+
+def load_brief_render_config() -> dict:
+    """Load ``config/brief_render.yaml`` (path via ``BRIEF_RENDER_CONFIG`` env
+    var, else ``<repo_root>/config/brief_render.yaml``).
+
+    Never raises: a missing file, unparsable YAML, or missing PyYAML all fall
+    back to :data:`_DEFAULT_RENDER_CONFIG` (deep-copied so callers can't
+    mutate the module default). Only recognised keys are honored; anything
+    else in the file is ignored.
+    """
+    cfg = copy.deepcopy(_DEFAULT_RENDER_CONFIG)
+    path_str = os.environ.get("BRIEF_RENDER_CONFIG", "").strip() or DEFAULT_BRIEF_RENDER_CONFIG_PATH
+    path = Path(path_str)
+    if not path.exists():
+        return cfg
+
+    try:
+        import yaml
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        logger.warning("Could not load brief render config %s (%s); using defaults", path, exc)
+        return cfg
+
+    if not isinstance(loaded, dict):
+        return cfg
+    todo_cfg = loaded.get("todo_section")
+    if not isinstance(todo_cfg, dict):
+        return cfg
+
+    fields = todo_cfg.get("fields")
+    if isinstance(fields, dict):
+        for field_name in cfg["todo_section"]["fields"]:
+            if field_name in fields:
+                cfg["todo_section"]["fields"][field_name] = bool(fields[field_name])
+
+    text_max_chars = todo_cfg.get("text_max_chars")
+    if isinstance(text_max_chars, int) and text_max_chars > 0:
+        cfg["todo_section"]["text_max_chars"] = text_max_chars
+
+    header_format = todo_cfg.get("header_format")
+    if isinstance(header_format, str) and header_format.strip():
+        cfg["todo_section"]["header_format"] = header_format
+
+    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -159,22 +228,120 @@ def render_journal_section(data: dict | None, reason: str) -> str:
     return "\n".join(lines)
 
 
+def _get_open_todos_safe() -> list:
+    """``todo_store.get_open_todos()``, defensively.
+
+    Snoozed todos are never included in the store's "open" result set (they
+    move to status='snoozed' via close_todo), so there is no separate
+    snooze-filtering step here — the store is the single source of truth for
+    what counts as "open". Any failure (store unavailable, corrupt DB, import
+    error) degrades to an empty list rather than crashing the scheduled brief.
+    """
+    try:
+        from services.hermes import todo_store
+    except Exception as exc:
+        logger.warning("todo_store unavailable; rendering empty todo section (%s)", exc)
+        return []
+    try:
+        return todo_store.get_open_todos()
+    except Exception as exc:
+        logger.warning("todo_store.get_open_todos() failed; rendering empty todo section (%s)", exc)
+        return []
+
+
+def _truncate_with_ellipsis(text: str, max_chars: int) -> str:
+    """Truncate ``text`` to ``max_chars``, appending an ellipsis when cut."""
+    text = text or ""
+    if len(text) <= max_chars:
+        return text
+    if max_chars <= 1:
+        return text[:max_chars]
+    return text[: max_chars - 1].rstrip() + "…"
+
+
+def _format_recency(todo: dict, today: str) -> str:
+    """``↻ {N}d`` for recurring todos (days since first_seen), else the
+    latest ``source_dates`` entry as ``MM-DD``. Never raises — an
+    unparseable/missing date degrades to ``"?"`` rather than crashing.
+    """
+    try:
+        today_date = date.fromisoformat(today)
+    except (TypeError, ValueError):
+        today_date = None
+
+    if todo.get("recurring"):
+        first_seen = todo.get("first_seen")
+        if first_seen and today_date is not None:
+            try:
+                first_seen_date = date.fromisoformat(str(first_seen)[:10])
+                days = max(0, (today_date - first_seen_date).days)
+                return f"↻ {days}d"
+            except ValueError:
+                pass
+        return "↻ ?"
+
+    source_dates = [d for d in (todo.get("source_dates") or []) if isinstance(d, str)]
+    if not source_dates:
+        return "?"
+    latest = max(source_dates)
+    try:
+        return date.fromisoformat(latest[:10]).strftime("%m-%d")
+    except ValueError:
+        return latest[:10]
+
+
+def _render_todo_row(todo: dict, fields: dict, text_max_chars: int, today: str) -> str:
+    """One aligned row: ``  {glyph} {key:<20} {text:<N}  {recency}`` — only
+    the fields enabled in ``fields`` are included.
+    """
+    glyph = "!" if str(todo.get("priority") or "").lower() == "high" else "·"
+    key = str(todo.get("key") or "")
+    text = _truncate_with_ellipsis(str(todo.get("text") or ""), text_max_chars)
+    recency = _format_recency(todo, today)
+
+    parts: list[str] = []
+    if fields.get("glyph", True):
+        parts.append(glyph)
+    if fields.get("key", True):
+        parts.append(f"{key:<20}")
+    if fields.get("text", True):
+        parts.append(f"{text:<{text_max_chars}}")
+    if fields.get("recency", True):
+        parts.append(recency)
+    return "  " + " ".join(parts)
+
+
 def render_todo_section(data: dict | None, reason: str) -> str:
+    """Render the aligned, fixed-width todo block.
+
+    ``data``/``reason`` are the journal contract's load result — used only
+    to resolve "today" (``for_date``, falling back to system date) for
+    recency computation. The row content itself comes from
+    ``todo_store.get_open_todos()``, NOT the raw contract's ``todos`` array:
+    the store is the persistent, authoritative record of what is actually
+    open across days, while the journal contract is just that day's
+    proposal. category/status/id/confidence/origin are intentionally never
+    rendered here.
+    """
     lines = ["## Section 2 — Todo List\n"]
-    if data is None:
-        lines.append(_unavailable_block(reason))
+    render_cfg = load_brief_render_config()["todo_section"]
+    today = ((data or {}).get("for_date")) or get_today_bangkok()
+
+    open_todos = _get_open_todos_safe()
+    header = render_cfg["header_format"].format(count=len(open_todos))
+
+    if not open_todos:
+        block = f"```\n{header}\n\n(no open todos)\n```"
+        lines.append(block)
         return "\n".join(lines)
 
-    todos = filter_todos(data.get("todos") or [])
-    if not todos:
-        lines.append("> (no todos today)\n")
-        return "\n".join(lines)
-
-    for todo in todos:
-        text = get_todo_text(todo)
-        suffix = " <!-- route: approval -->" if todo.get("_approval_route") else ""
-        lines.append(f"- {text}{suffix}")
-
+    fields = render_cfg["fields"]
+    text_max_chars = render_cfg["text_max_chars"]
+    rows = [
+        _render_todo_row(todo, fields, text_max_chars, today) for todo in open_todos
+    ]
+    block = "```\n" + "\n".join([header, ""] + rows) + "\n```"
+    lines.append(block)
     return "\n".join(lines)
 
 
@@ -283,6 +450,29 @@ def render_dev_report_section(data: dict | None, reason: str) -> str:
 # Composer
 # ---------------------------------------------------------------------------
 
+def _render_away_marker(for_date: str) -> str:
+    """One-line away-mode marker, or ``""`` when away mode is not active.
+
+    Never raises: any failure reaching ``away_mode`` (missing module, DB
+    error) is treated as "not away" rather than crashing the scheduled brief.
+    """
+    try:
+        from services.hermes import away_mode
+    except Exception:
+        return ""
+    try:
+        status = away_mode.away_status(for_date)
+    except Exception as exc:
+        logger.warning("away_mode.away_status() failed; omitting away marker (%s)", exc)
+        return ""
+    if not status.get("active"):
+        return ""
+    until = status.get("until")
+    if until:
+        return f"> 🌙 Away mode on until {until} — overnight runs and bedtime prompts are paused.\n"
+    return "> 🌙 Away mode on — overnight runs and bedtime prompts are paused.\n"
+
+
 def compose_brief(
     journal_data: dict | None,
     journal_reason: str,
@@ -291,16 +481,25 @@ def compose_brief(
     commander_data: dict | None,
     commander_reason: str,
 ) -> str:
+    for_date = (journal_data or {}).get("for_date") or get_today_bangkok()
+    away_marker = _render_away_marker(for_date)
+
     sections = [
         "# Morning Brief\n",
-        render_journal_section(journal_data, journal_reason),
-        "",
-        render_todo_section(journal_data, journal_reason),
-        "",
-        render_training_section(perfcoach_data, perfcoach_reason),
-        "",
-        render_dev_report_section(commander_data, commander_reason),
     ]
+    if away_marker:
+        sections.append(away_marker)
+    sections.extend(
+        [
+            render_journal_section(journal_data, journal_reason),
+            "",
+            render_todo_section(journal_data, journal_reason),
+            "",
+            render_training_section(perfcoach_data, perfcoach_reason),
+            "",
+            render_dev_report_section(commander_data, commander_reason),
+        ]
+    )
     return "\n".join(sections)
 
 
