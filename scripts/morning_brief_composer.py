@@ -61,7 +61,7 @@ DEFAULT_BRIEF_RENDER_CONFIG_PATH = str(_REPO_ROOT / "config" / "brief_render.yam
 _DEFAULT_RENDER_CONFIG = {
     "todo_section": {
         "fields": {"glyph": True, "key": True, "text": True, "recency": True},
-        "text_max_chars": 32,
+        "text_max_chars": 64,
         "header_format": "To-do · {count} open · /done <key>",
     }
 }

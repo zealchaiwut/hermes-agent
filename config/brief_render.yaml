@@ -15,5 +15,5 @@ todo_section:
     key: true
     text: true
     recency: true
-  text_max_chars: 32
+  text_max_chars: 64
   header_format: "To-do · {count} open · /done <key>"
