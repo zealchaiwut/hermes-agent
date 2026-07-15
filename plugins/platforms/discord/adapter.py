@@ -790,6 +790,59 @@ def _read_bedtime_config() -> dict:
     return {"enabled": True, "hour": hour, "minute": minute, "timeout": timeout}
 
 
+def _read_approvals_config() -> dict:
+    """Return the journal-approvals dispatcher configuration from environment variables.
+
+    Keys:
+        enabled — True when DISCORD_APPROVALS_HOUR is set and parseable
+        hour    — int, UTC hour (0-23)
+        minute  — int, UTC minute (0-59, default 0)
+    """
+    raw_hour = os.getenv("DISCORD_APPROVALS_HOUR", "").strip()
+    if not raw_hour:
+        return {"enabled": False, "hour": 0, "minute": 0}
+    try:
+        hour = int(raw_hour)
+    except ValueError:
+        return {"enabled": False, "hour": 0, "minute": 0}
+    raw_minute = os.getenv("DISCORD_APPROVALS_MINUTE", "0").strip()
+    try:
+        minute = int(raw_minute)
+    except ValueError:
+        minute = 0
+    return {"enabled": True, "hour": hour, "minute": minute}
+
+
+def _read_journal_brief_path() -> str:
+    """Return the path to journal_brief.latest.json.
+
+    Honors JOURNAL_BRIEF_PATH like scripts/morning_brief_composer.py; falls
+    back to HERMES_HOME/contracts/journal_brief.latest.json (same default
+    the composer uses).
+    """
+    raw = os.environ.get("JOURNAL_BRIEF_PATH", "").strip()
+    if raw:
+        return raw
+    home = os.environ.get("HERMES_HOME", "").strip() or os.path.expanduser("~/.hermes")
+    return os.path.join(home, "contracts", "journal_brief.latest.json")
+
+
+def _read_morning_brief_channel_id() -> str:
+    """Return ``discord.morning_brief_channel_id`` from config.yaml, or "".
+
+    Same lookup used by cron/scripts/morning_brief_discord.py and
+    cron/jobs.py's morning-brief job registration.
+    """
+    try:
+        from hermes_cli.config import read_raw_config
+        cfg = read_raw_config() or {}
+        discord_cfg = cfg.get("discord", {}) or {}
+        raw = discord_cfg.get("morning_brief_channel_id")
+    except Exception:
+        return ""
+    return str(raw or "").strip()
+
+
 def _read_discord_prompt_timeout() -> int:
     """Return the timeout (in seconds) for Discord button views.
 
@@ -905,6 +958,7 @@ class DiscordAdapter(BasePlatformAdapter):
         )
         self._liveness_task: Optional[asyncio.Task] = None
         self._bedtime_task: Optional[asyncio.Task] = None
+        self._approvals_task: Optional[asyncio.Task] = None
         # True while disconnect() is intentionally closing discord.py. The
         # bot task's done callback uses this to distinguish an operator/service
         # shutdown from a runtime websocket crash.
@@ -1517,6 +1571,128 @@ class DiscordAdapter(BasePlatformAdapter):
                 pass
         self._bedtime_task = None
 
+    def _start_approvals_scheduler(self) -> None:
+        """Start the daily journal-approvals dispatcher if configured.
+
+        Idempotent: a second call while the task is live is a no-op. The
+        loop fires once per day at DISCORD_APPROVALS_HOUR:DISCORD_APPROVALS_MINUTE
+        (UTC), reads dev-category todos from the journal brief, and posts
+        one [Approve] embed per todo to config.yaml's
+        discord.morning_brief_channel_id.
+        """
+        cfg = _read_approvals_config()
+        if not cfg["enabled"]:
+            logger.debug("[%s] Journal approvals scheduler disabled", self.name)
+            return
+        if self._approvals_task and not self._approvals_task.done():
+            return
+        self._approvals_task = asyncio.create_task(self._approvals_scheduler_loop(cfg))
+        logger.info(
+            "[%s] Journal approvals scheduler started (fire at %02d:%02d UTC)",
+            self.name, cfg["hour"], cfg["minute"],
+        )
+
+    async def _approvals_scheduler_loop(self, cfg: dict) -> None:
+        """Loop indefinitely, firing the journal-approvals dispatcher once per day."""
+        import datetime
+
+        while True:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            target = now_utc.replace(
+                hour=cfg["hour"], minute=cfg["minute"], second=0, microsecond=0
+            )
+            if target <= now_utc:
+                target += datetime.timedelta(days=1)
+            delay = (target - now_utc).total_seconds()
+            logger.debug(
+                "[%s] Journal approvals scheduler: sleeping %.0fs until %s UTC",
+                self.name, delay, target.isoformat(),
+            )
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+
+            try:
+                await self._fire_journal_approvals()
+            except Exception as exc:
+                logger.error(
+                    "[%s] Journal approvals: unexpected error firing dispatcher: %s",
+                    self.name, exc,
+                )
+
+    async def _fire_journal_approvals(self) -> None:
+        """Post one [Approve] embed per dev-category journal todo.
+
+        Skips (with a log line) when JOURNAL_APPROVE_PROJECT or the target
+        channel is not configured, when there are zero dev todos, or when
+        today's date is already recorded as posted (gateway restart guard).
+        """
+        import datetime
+
+        from services.hermes import journal_approve
+
+        today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        if journal_approve.has_posted_approvals_today(today):
+            logger.debug(
+                "[%s] Journal approvals: already posted for %s; skipping",
+                self.name, today,
+            )
+            return
+
+        project = os.getenv("JOURNAL_APPROVE_PROJECT", "").strip()
+        if not project:
+            logger.warning(
+                "[%s] Journal approvals: JOURNAL_APPROVE_PROJECT not set; skipping",
+                self.name,
+            )
+            return
+
+        brief_path = _read_journal_brief_path()
+        try:
+            raw_todos = await asyncio.to_thread(journal_approve.load_dev_todos, brief_path)
+        except Exception as exc:
+            logger.error(
+                "[%s] Journal approvals: failed to load dev todos from %s: %s",
+                self.name, brief_path, exc,
+            )
+            return
+
+        todos = journal_approve.map_dev_todos_for_send(raw_todos)
+        if not todos:
+            logger.info("[%s] Journal approvals: no dev todos to post", self.name)
+            return
+
+        channel_id = _read_morning_brief_channel_id()
+        if not channel_id or not self._client:
+            logger.warning(
+                "[%s] Journal approvals: discord.morning_brief_channel_id not set; skipping",
+                self.name,
+            )
+            return
+
+        result = await self.send_journal_dev_todos(channel_id, todos, project=project)
+        if result.success:
+            journal_approve.mark_approvals_posted(today)
+            logger.info(
+                "[%s] Journal approvals posted (%d todo(s), channel=%s)",
+                self.name, len(todos), channel_id,
+            )
+        else:
+            logger.error(
+                "[%s] Journal approvals: failed to post: %s", self.name, result.error,
+            )
+
+    async def _cancel_approvals_task(self) -> None:
+        """Cancel and await the journal-approvals scheduler task, if running."""
+        if self._approvals_task and not self._approvals_task.done():
+            self._approvals_task.cancel()
+            try:
+                await self._approvals_task
+            except asyncio.CancelledError:
+                pass
+        self._approvals_task = None
+
     async def cancel_background_tasks(self) -> None:
         """Cancel background tasks, but first flush any pending text-batch sends.
 
@@ -1555,6 +1731,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._pending_text_batch_tasks.clear()
         self._pending_text_batches.clear()
         await self._cancel_bedtime_task()
+        await self._cancel_approvals_task()
         await super().cancel_background_tasks()
 
     def _text_batch_flush_deadline_seconds(self) -> float:
@@ -1817,6 +1994,7 @@ class DiscordAdapter(BasePlatformAdapter):
         if not self._client:
             return
         self._start_bedtime_scheduler()
+        self._start_approvals_scheduler()
         try:
             sync_policy = self._get_discord_command_sync_policy()
             if sync_policy == "off":
