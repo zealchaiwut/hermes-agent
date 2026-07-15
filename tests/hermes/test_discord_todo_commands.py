@@ -19,6 +19,12 @@ from services.hermes import discord as hdiscord
 from services.hermes import away_mode
 from services.hermes import todo_store as ts
 
+try:
+    import discord as _discord_check  # noqa: F401
+    HAS_DISCORD = True
+except ImportError:
+    HAS_DISCORD = False
+
 
 @pytest.fixture(autouse=True)
 def _isolated_home(tmp_path, monkeypatch):
@@ -219,6 +225,7 @@ class TestHandleAwayOnOff:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(not HAS_DISCORD, reason="discord.py not installed")
 class TestAutocompleteTodoKey:
     @pytest.mark.asyncio
     async def test_sources_from_open_keys(self):
