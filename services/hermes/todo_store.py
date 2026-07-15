@@ -381,6 +381,48 @@ def reopen_expired_snoozes(today: str) -> list[str]:
 _PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 
 
+def get_open_todos() -> list[dict]:
+    """Open (non-snoozed, non-closed) todos with the full display field set.
+
+    Same rows/ordering as :func:`get_open_keys` (priority high/medium/low,
+    unknown last; ``last_seen`` descending within a priority) but includes
+    ``priority``, ``recurring``, ``source_dates`` (parsed back into a list)
+    and ``first_seen`` — the fields the morning-brief renderer needs for the
+    glyph/recency columns. :func:`get_open_keys` is a thin projection of
+    this down to ``{"key", "text"}`` for the journal ``OPEN_KEYS`` injection.
+    """
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT key, text, priority, recurring, source_dates, first_seen, last_seen "
+            "FROM todos WHERE status='open'"
+        ).fetchall()
+    finally:
+        conn.close()
+    items: list[dict] = []
+    for r in rows:
+        try:
+            source_dates = json.loads(r["source_dates"]) if r["source_dates"] else []
+        except (TypeError, ValueError):
+            source_dates = []
+        if not isinstance(source_dates, list):
+            source_dates = []
+        items.append(
+            {
+                "key": r["key"],
+                "text": r["text"],
+                "priority": r["priority"],
+                "recurring": bool(r["recurring"]),
+                "source_dates": [d for d in source_dates if isinstance(d, str)],
+                "first_seen": r["first_seen"],
+                "last_seen": r["last_seen"],
+            }
+        )
+    items.sort(key=lambda d: d["last_seen"] or "", reverse=True)
+    items.sort(key=lambda d: _PRIORITY_ORDER.get((d["priority"] or "").lower(), 3))
+    return items
+
+
 def get_open_keys() -> list[dict]:
     """Open (non-snoozed, non-closed) todos as ``[{"key":..., "text":...}]``.
 
@@ -388,20 +430,7 @@ def get_open_keys() -> list[dict]:
     ``last_seen`` descending within a priority. This is what gets exported
     for the Discord select menu / journal's ``OPEN_KEYS`` injection.
     """
-    conn = connect()
-    try:
-        rows = conn.execute(
-            "SELECT key, text, priority, last_seen FROM todos WHERE status='open'"
-        ).fetchall()
-    finally:
-        conn.close()
-    items = [
-        {"key": r["key"], "text": r["text"], "priority": r["priority"], "last_seen": r["last_seen"]}
-        for r in rows
-    ]
-    items.sort(key=lambda d: d["last_seen"] or "", reverse=True)
-    items.sort(key=lambda d: _PRIORITY_ORDER.get((d["priority"] or "").lower(), 3))
-    return [{"key": d["key"], "text": d["text"]} for d in items]
+    return [{"key": d["key"], "text": d["text"]} for d in get_open_todos()]
 
 
 def get_closed_keys() -> list[str]:

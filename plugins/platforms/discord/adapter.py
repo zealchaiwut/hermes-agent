@@ -813,6 +813,35 @@ def _read_approvals_config() -> dict:
     return {"enabled": True, "hour": hour, "minute": minute}
 
 
+def _read_todo_closure_config() -> dict:
+    """Return the todo-closure-view scheduler configuration from environment
+    variables.
+
+    Keys:
+        enabled — True when DISCORD_TODO_CLOSURE_HOUR is set and parseable
+        hour    — int, UTC hour (0-23)
+        minute  — int, UTC minute (0-59, default 0)
+
+    Same shape/env-var convention as :func:`_read_approvals_config` /
+    :func:`_read_bedtime_config` — fires once per day, posting the
+    TodoClosureView (see send_todo_closure_view) to
+    discord.morning_brief_channel_id.
+    """
+    raw_hour = os.getenv("DISCORD_TODO_CLOSURE_HOUR", "").strip()
+    if not raw_hour:
+        return {"enabled": False, "hour": 0, "minute": 0}
+    try:
+        hour = int(raw_hour)
+    except ValueError:
+        return {"enabled": False, "hour": 0, "minute": 0}
+    raw_minute = os.getenv("DISCORD_TODO_CLOSURE_MINUTE", "0").strip()
+    try:
+        minute = int(raw_minute)
+    except ValueError:
+        minute = 0
+    return {"enabled": True, "hour": hour, "minute": minute}
+
+
 def _read_journal_brief_path() -> str:
     """Return the path to journal_brief.latest.json.
 
@@ -959,6 +988,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._liveness_task: Optional[asyncio.Task] = None
         self._bedtime_task: Optional[asyncio.Task] = None
         self._approvals_task: Optional[asyncio.Task] = None
+        self._todo_closure_task: Optional[asyncio.Task] = None
         # True while disconnect() is intentionally closing discord.py. The
         # bot task's done callback uses this to distinguish an operator/service
         # shutdown from a runtime websocket crash.
@@ -1498,6 +1528,32 @@ class DiscordAdapter(BasePlatformAdapter):
             except asyncio.CancelledError:
                 return
 
+            # Away-mode kill switch: skip the prompt entirely (no LLM call,
+            # no backlog fetch — just the store check) while away, then go
+            # back to sleep for the next night. Recompute "today" fresh here
+            # rather than reusing the pre-sleep ``now_utc`` — the sleep can
+            # span a midnight UTC rollover.
+            today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+            try:
+                from services.hermes import away_mode
+                is_away = away_mode.is_away(today_str)
+            except Exception as exc:
+                logger.warning(
+                    "[%s] Bedtime: away_mode check failed (%s); proceeding as not-away",
+                    self.name, exc,
+                )
+                is_away = False
+            if is_away:
+                try:
+                    until = away_mode.away_status(today_str).get("until")
+                except Exception:
+                    until = None
+                logger.info(
+                    "[%s] Bedtime prompt skipped — away mode active until %s",
+                    self.name, until or "(indefinite)",
+                )
+                continue
+
             # Fetch backlog count
             try:
                 from services.hermes.bedtime import fetch_backlog_count
@@ -1695,6 +1751,105 @@ class DiscordAdapter(BasePlatformAdapter):
                 pass
         self._approvals_task = None
 
+    def _start_todo_closure_scheduler(self) -> None:
+        """Start the daily todo-closure-view dispatcher if configured.
+
+        Idempotent: a second call while the task is live is a no-op. Same
+        in-process live-client posting pattern as bedtime/approvals — the
+        loop fires once per day at DISCORD_TODO_CLOSURE_HOUR:MINUTE (UTC)
+        and posts the interactive [Mark Done/Dismiss/Snooze] control (see
+        send_todo_closure_view) for the current open todos.
+        """
+        cfg = _read_todo_closure_config()
+        if not cfg["enabled"]:
+            logger.debug("[%s] Todo closure view scheduler disabled", self.name)
+            return
+        if self._todo_closure_task and not self._todo_closure_task.done():
+            return
+        self._todo_closure_task = asyncio.create_task(self._todo_closure_scheduler_loop(cfg))
+        logger.info(
+            "[%s] Todo closure view scheduler started (fire at %02d:%02d UTC)",
+            self.name, cfg["hour"], cfg["minute"],
+        )
+
+    async def _todo_closure_scheduler_loop(self, cfg: dict) -> None:
+        """Loop indefinitely, firing the todo-closure-view dispatcher once per day."""
+        import datetime
+
+        while True:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            target = now_utc.replace(
+                hour=cfg["hour"], minute=cfg["minute"], second=0, microsecond=0
+            )
+            if target <= now_utc:
+                target += datetime.timedelta(days=1)
+            delay = (target - now_utc).total_seconds()
+            logger.debug(
+                "[%s] Todo closure view scheduler: sleeping %.0fs until %s UTC",
+                self.name, delay, target.isoformat(),
+            )
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+
+            try:
+                await self._fire_todo_closure()
+            except Exception as exc:
+                logger.error(
+                    "[%s] Todo closure view: unexpected error firing dispatcher: %s",
+                    self.name, exc,
+                )
+
+    async def _fire_todo_closure(self) -> None:
+        """Post the todo-closure control for the current open todos.
+
+        Skips (with a log line) when discord.morning_brief_channel_id is not
+        configured, or when there are zero open todos.
+        """
+        from services.hermes import todo_store
+
+        try:
+            open_todos = await asyncio.to_thread(todo_store.get_open_todos)
+        except Exception as exc:
+            logger.error(
+                "[%s] Todo closure view: failed to read open todos: %s", self.name, exc,
+            )
+            return
+
+        if not open_todos:
+            logger.info("[%s] Todo closure view: no open todos to post", self.name)
+            return
+
+        channel_id = _read_morning_brief_channel_id()
+        if not channel_id or not self._client:
+            logger.warning(
+                "[%s] Todo closure view: discord.morning_brief_channel_id not set; skipping",
+                self.name,
+            )
+            return
+
+        result = await self.send_todo_closure_view(channel_id, open_todos)
+        if result.success:
+            logger.info(
+                "[%s] Todo closure view posted (%d open todo(s), channel=%s)",
+                self.name, len(open_todos), channel_id,
+            )
+        else:
+            logger.error(
+                "[%s] Todo closure view: failed to post: %s", self.name, result.error,
+            )
+
+    async def _cancel_todo_closure_task(self) -> None:
+        """Cancel and await the todo-closure-view scheduler task, if running."""
+        if self._todo_closure_task and not self._todo_closure_task.done():
+            self._todo_closure_task.cancel()
+            try:
+                await self._todo_closure_task
+            except asyncio.CancelledError:
+                pass
+        self._todo_closure_task = None
+
     async def cancel_background_tasks(self) -> None:
         """Cancel background tasks, but first flush any pending text-batch sends.
 
@@ -1734,6 +1889,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._pending_text_batches.clear()
         await self._cancel_bedtime_task()
         await self._cancel_approvals_task()
+        await self._cancel_todo_closure_task()
         await super().cancel_background_tasks()
 
     def _text_batch_flush_deadline_seconds(self) -> float:
@@ -1997,6 +2153,7 @@ class DiscordAdapter(BasePlatformAdapter):
             return
         self._start_bedtime_scheduler()
         self._start_approvals_scheduler()
+        self._start_todo_closure_scheduler()
         try:
             sync_policy = self._get_discord_command_sync_policy()
             if sync_policy == "off":
@@ -4548,6 +4705,30 @@ class DiscordAdapter(BasePlatformAdapter):
         except Exception as _rpe_err:
             logger.debug("Failed to register /rpe command: %s", _rpe_err)
 
+        # ── /done, /dismiss, /snooze — persistent todo store closure ──────────
+        try:
+            from services.hermes.discord import (
+                register_dismiss_command,
+                register_done_command,
+                register_snooze_command,
+            )
+            register_done_command(tree)
+            register_dismiss_command(tree)
+            register_snooze_command(tree)
+        except Exception as _todo_cmd_err:
+            logger.debug("Failed to register /done, /dismiss, /snooze commands: %s", _todo_cmd_err)
+
+        # ── /away-on, /away-off — away-mode kill switch ────────────────────────
+        try:
+            from services.hermes.discord import (
+                register_away_off_command,
+                register_away_on_command,
+            )
+            register_away_on_command(tree)
+            register_away_off_command(tree)
+        except Exception as _away_cmd_err:
+            logger.debug("Failed to register /away-on, /away-off commands: %s", _away_cmd_err)
+
         # ── Auto-register any gateway-available commands not yet on the tree ──
         # This ensures new commands added to COMMAND_REGISTRY in
         # hermes_cli/commands.py automatically appear as Discord slash
@@ -6236,6 +6417,59 @@ class DiscordAdapter(BasePlatformAdapter):
             logger.warning("[%s] send_journal_dev_todos failed: %s", self.name, exc)
             return SendResult(success=False, error=str(exc))
 
+    async def send_todo_closure_view(
+        self,
+        chat_id: str,
+        open_todos: list,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Post a standalone [Mark Done / Dismiss / Snooze] control for open todos.
+
+        Companion to the morning brief's plain-text todo section (rendered
+        by scripts.morning_brief_composer): the brief text itself is
+        typically delivered by a separate no-agent cron process
+        (cron/scripts/morning_brief_discord.py) via raw REST, which has no
+        live client and so cannot host interactive components. This method
+        is the live-gateway-process path — the caller must own a connected
+        ``self._client`` (e.g. the gateway's own ``_todo_closure_scheduler_loop``
+        below), so the same running process that posts the view also
+        receives its interactions. This mirrors exactly how
+        JournalApproveView / BedtimeView already work: there is no explicit
+        "registration" step beyond passing ``view=`` to ``channel.send`` —
+        the poster and the interaction-handler are the same long-running
+        process for as long as it stays up and the view hasn't timed out.
+
+        No-op (success, empty message_id) when there are no open todos.
+        """
+        if not self._client or not DISCORD_AVAILABLE:
+            return SendResult(success=False, error="Not connected")
+        if not open_todos:
+            return SendResult(success=True, message_id="")
+
+        try:
+            target_id = chat_id
+            if metadata and metadata.get("thread_id"):
+                target_id = metadata["thread_id"]
+
+            channel = self._client.get_channel(int(target_id))
+            if not channel:
+                channel = await self._client.fetch_channel(int(target_id))
+
+            view = TodoClosureView(
+                open_todos=open_todos,
+                allowed_user_ids=self._allowed_user_ids,
+                allowed_role_ids=self._allowed_role_ids,
+            )
+            msg = await channel.send(
+                content="Manage your open todos — select then click an action:",
+                view=view,
+            )
+            view._message = msg
+            return SendResult(success=True, message_id=str(msg.id))
+        except Exception as exc:
+            logger.warning("[%s] send_todo_closure_view failed: %s", self.name, exc)
+            return SendResult(success=False, error=str(exc))
+
     async def send_update_prompt(
         self, chat_id: str, prompt: str, default: str = "",
         session_key: str = "",
@@ -7221,7 +7455,7 @@ def _define_discord_view_classes() -> None:
     lazy install sets DISCORD_AVAILABLE=True but leaves the classes
     undefined, causing NameError on the first button interaction.
     """
-    global ExecApprovalView, SlashConfirmView, UpdatePromptView, ModelPickerView, ClarifyChoiceView, JournalApproveView, BedtimeView
+    global ExecApprovalView, SlashConfirmView, UpdatePromptView, ModelPickerView, ClarifyChoiceView, JournalApproveView, BedtimeView, TodoClosureView
 
     class ExecApprovalView(discord.ui.View):
         """
@@ -8481,6 +8715,176 @@ def _define_discord_view_classes() -> None:
                         content="⏰ Overnight sprint prompt timed out — no action taken.",
                         view=self,
                     )
+                except Exception:
+                    pass
+
+    class TodoClosureView(discord.ui.View):
+        """Select-then-act view for closing out open todos from the morning brief.
+
+        A multi-select (0-25 of the current open todos, key -> "{glyph}
+        {text}" label) plus three buttons — Mark Done / Dismiss / Snooze 1
+        week — that apply the chosen ``todo_store`` action to whatever is
+        currently checked in the select. Modeled directly on
+        JournalApproveView's select-then-button pattern (project dropdown +
+        Approve button): the select updates ``self.selected`` and the
+        buttons act on it, rather than each option carrying its own
+        per-item action button (Discord selects don't support that).
+
+        Same auth gate as the other component views (_component_check_auth).
+        Closed keys are removed from the select's options after a
+        successful action so they can't be re-clicked; the underlying
+        message is edited in place rather than requiring a full brief
+        re-render.
+        """
+
+        def __init__(
+            self,
+            open_todos: list,
+            allowed_user_ids: set,
+            allowed_role_ids: Optional[set] = None,
+        ):
+            super().__init__(timeout=_read_discord_prompt_timeout())
+            # Discord caps select options at 25 — truncate defensively.
+            self.open_todos = {
+                str(t.get("key")): t for t in (open_todos or [])[:25] if t.get("key")
+            }
+            self.allowed_user_ids = allowed_user_ids
+            self.allowed_role_ids = allowed_role_ids or set()
+            self.selected: set = set()
+            self._select: Optional["discord.ui.Select"] = None
+            self._build_select()
+
+        def _check_auth(self, interaction: discord.Interaction) -> bool:
+            return _component_check_auth(
+                interaction, self.allowed_user_ids, self.allowed_role_ids
+            )
+
+        def _build_select(self) -> None:
+            options = []
+            for key, todo in self.open_todos.items():
+                glyph = "!" if str(todo.get("priority") or "").lower() == "high" else "·"
+                text = str(todo.get("text") or "")
+                label = _truncate_discord_component_text(
+                    f"{glyph} {text}", _DISCORD_SELECT_FIELD_LIMIT
+                )
+                options.append(
+                    discord.SelectOption(
+                        label=label or key,
+                        value=_truncate_discord_component_text(key, _DISCORD_SELECT_FIELD_LIMIT),
+                    )
+                )
+            select = discord.ui.Select(
+                placeholder="Choose todo(s) to act on...",
+                options=options or [discord.SelectOption(label="(no open todos)", value="__none__")],
+                min_values=0,
+                max_values=max(1, len(options)),
+                disabled=not options,
+                custom_id="todo_closure_select",
+                row=0,
+            )
+            select.callback = self._on_select
+            self._select = select
+            self.add_item(select)
+
+        async def _on_select(self, interaction: discord.Interaction) -> None:
+            """Record the current selection. Does not apply any action."""
+            if not self._check_auth(interaction):
+                await interaction.response.send_message(
+                    "You're not authorised to manage todos.", ephemeral=True
+                )
+                return
+
+            values = (interaction.data or {}).get("values") or []
+            self.selected = {v for v in values if v != "__none__"}
+            try:
+                await interaction.response.send_message(
+                    f"Selected {len(self.selected)} todo(s) — click a button below to apply.",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
+
+        async def _apply(self, interaction: discord.Interaction, action: str, label: str) -> None:
+            if not self._check_auth(interaction):
+                await interaction.response.send_message(
+                    "You're not authorised to manage todos.", ephemeral=True
+                )
+                return
+            if not self.selected:
+                await interaction.response.send_message(
+                    "Select at least one todo first.", ephemeral=True
+                )
+                return
+
+            from services.hermes import todo_store
+
+            snooze_until = None
+            if action == "snooze":
+                import datetime as _dt
+                snooze_until = (_dt.date.today() + _dt.timedelta(days=7)).isoformat()
+
+            ok_keys: list = []
+            err_parts: list = []
+            for key in sorted(self.selected):
+                try:
+                    result = await asyncio.to_thread(
+                        todo_store.close_todo, key, action, "discord:select", snooze_until,
+                    )
+                except Exception as exc:
+                    result = {"ok": False, "error": str(exc)}
+                if result.get("ok"):
+                    ok_keys.append(key)
+                else:
+                    err_parts.append(f"`{key}`: {result.get('error', 'unknown error')}")
+
+            # Remove closed options from the select so they can't be
+            # re-clicked; disable it entirely once nothing is left.
+            if self._select is not None:
+                self._select.options = [
+                    opt for opt in self._select.options if opt.value not in ok_keys
+                ]
+                if not self._select.options:
+                    self._select.options = [
+                        discord.SelectOption(label="(no open todos)", value="__none__")
+                    ]
+                    self._select.disabled = True
+            self.selected = set()
+
+            reply_parts = []
+            if ok_keys:
+                reply_parts.append(f"✅ {label}: " + ", ".join(f"`{k}`" for k in ok_keys))
+            if err_parts:
+                reply_parts.append("⚠️ " + "; ".join(err_parts))
+            reply = "\n".join(reply_parts) if reply_parts else "No changes made."
+
+            try:
+                await interaction.response.edit_message(view=self)
+                await interaction.followup.send(content=reply, ephemeral=True)
+            except Exception:
+                try:
+                    await interaction.followup.send(content=reply, ephemeral=True)
+                except Exception:
+                    pass
+
+        @discord.ui.button(label="Mark Done", style=discord.ButtonStyle.green, custom_id="todo_closure_done", row=1)
+        async def mark_done(self, interaction: discord.Interaction, button: discord.ui.Button):
+            await self._apply(interaction, "done", "Marked done")
+
+        @discord.ui.button(label="Dismiss", style=discord.ButtonStyle.grey, custom_id="todo_closure_dismiss", row=1)
+        async def dismiss(self, interaction: discord.Interaction, button: discord.ui.Button):
+            await self._apply(interaction, "dismiss", "Dismissed")
+
+        @discord.ui.button(label="Snooze 1 week", style=discord.ButtonStyle.blurple, custom_id="todo_closure_snooze", row=1)
+        async def snooze(self, interaction: discord.Interaction, button: discord.ui.Button):
+            await self._apply(interaction, "snooze", "Snoozed 1 week")
+
+        async def on_timeout(self) -> None:
+            for child in self.children:
+                child.disabled = True
+            msg = getattr(self, "_message", None)
+            if msg:
+                try:
+                    await msg.edit(view=self)
                 except Exception:
                     pass
 

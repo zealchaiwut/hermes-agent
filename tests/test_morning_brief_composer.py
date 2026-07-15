@@ -267,25 +267,16 @@ class TestTodoContentField:
         result = filter_todos(todos)
         assert len(result) == 1
 
-    def test_render_todo_section_uses_content_field(self):
-        todos = [{"content": "Ship the release", "confidence": 0.9, "priority": 5, "category": "dev"}]
-        data = _journal_data(todos=todos)
-        section = render_todo_section(data, "")
-        assert "Ship the release" in section
-
-    def test_render_todo_section_content_key_contract_shape(self):
-        """End-to-end: a journal contract shaped with "content" (the
-        canonical field name) renders correctly through the full section."""
-        data = _journal_data(
-            todos=[
-                {"content": "Write the design doc", "confidence": 0.8, "priority": 3, "category": "dev"},
-                {"content": "Water the plants", "confidence": 0.7, "priority": 1, "category": "personal"},
-            ]
-        )
-        section = render_todo_section(data, "")
-        assert "Write the design doc" in section
-        assert "Water the plants" in section
-        assert "<!-- route: approval -->" in section
+    # NOTE: render_todo_section() no longer sources from the raw journal
+    # contract's todos[] at all — it reads services.hermes.todo_store's
+    # persistent, stable-key store instead (see TestRenderTodoSectionFromStore
+    # below). The two tests formerly here fed contract-shaped todos straight
+    # into render_todo_section() and asserted the text/annotation showed up
+    # in the output; that assumption is now false regardless of the "content"
+    # vs "text" field question this class is actually about, so they were
+    # removed rather than patched — get_todo_text()'s own behavior (the
+    # thing this class is meant to cover) is still fully exercised by the
+    # tests above.
 
 
 # ---------------------------------------------------------------------------
@@ -371,36 +362,21 @@ class TestDevCategoryAnnotation:
         result = filter_todos(todos)
         assert not result[0].get("_approval_route")
 
-    def test_annotation_in_rendered_output(self):
-        todos = [
-            {"text": "Ship it", "confidence": 0.9, "priority": 5, "category": "dev"},
-            {"text": "Meditate", "confidence": 0.9, "priority": 3, "category": "wellness"},
-        ]
-        data = _journal_data(todos=todos)
-        section = render_todo_section(data, "")
-        assert "<!-- route: approval -->" in section
-
+    # test_annotation_in_rendered_output and test_mixed_categories_only_dev_
+    # annotated formerly asserted render_todo_section() emits
+    # "<!-- route: approval -->" for category="dev" contract items.
+    # render_todo_section() now renders exclusively from
+    # services.hermes.todo_store.get_open_todos() (see
+    # TestRenderTodoSectionFromStore below), whose rows carry no "category"
+    # field at all — that annotation path is dead in the new renderer, so
+    # those two tests were removed. test_non_dev_no_approval_comment_in_output
+    # (kept below) still documents that the string never appears, which
+    # remains true (trivially, now) and doubles as a forbidden-field guard.
     def test_non_dev_no_approval_comment_in_output(self):
         todos = [{"text": "Read a book", "confidence": 0.9, "priority": 5, "category": "learning"}]
         data = _journal_data(todos=todos)
         section = render_todo_section(data, "")
         assert "<!-- route: approval -->" not in section
-
-    def test_mixed_categories_only_dev_annotated(self):
-        todos = [
-            {"text": "Code review", "confidence": 0.9, "priority": 8, "category": "dev"},
-            {"text": "Buy coffee", "confidence": 0.9, "priority": 7, "category": "personal"},
-        ]
-        data = _journal_data(todos=todos)
-        section = render_todo_section(data, "")
-        lines = section.splitlines()
-        dev_line = next((l for l in lines if "Code review" in l), "")
-        personal_line = next((l for l in lines if "Buy coffee" in l), "")
-        assert "<!-- route: approval -->" in dev_line or any(
-            "<!-- route: approval -->" in lines[i]
-            for i, l in enumerate(lines) if "Code review" in l
-        )
-        assert "<!-- route: approval -->" not in personal_line
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +473,13 @@ class TestAllContractsUnavailable:
     def test_all_unavailable_brief_has_four_sections(self):
         brief = compose_brief(None, "file not found", None, "file not found", None, "file not found")
         assert "Journal Reflection" in brief or "Section 1" in brief or "## " in brief
-        assert brief.count("⚠️ unavailable") == 4
+        # Only 3 of the 4 sections show "⚠️ unavailable" — the todo section
+        # (Section 2) no longer depends on the journal contract at all; an
+        # unavailable/missing contract just means "today" falls back to the
+        # system date for recency math, while the row content itself comes
+        # from todo_store.get_open_todos() (empty here -> "(no open todos)").
+        assert brief.count("⚠️ unavailable") == 3
+        assert "(no open todos)" in brief
 
     def test_all_unavailable_brief_is_string(self):
         brief = compose_brief(None, "missing", None, "missing", None, "missing")
@@ -708,3 +690,278 @@ class TestSessionRendering:
         assert "{" not in section  # no raw dict repr leaking into output
         assert "session type: tempo run" in section
         assert "**recent_wrap:** Rest / nothing planned" in section
+
+
+# ---------------------------------------------------------------------------
+# render_todo_section — sources from services.hermes.todo_store.get_open_todos(),
+# NOT the raw journal contract. HERMES_HOME is isolated per test by
+# tests/conftest.py's autouse fixture, so every test gets a fresh todos.db.
+# ---------------------------------------------------------------------------
+
+def _seed_todo(key, text="fake task text", priority="medium", for_date="2026-07-14",
+                source_dates=None, recurring=False):
+    from services.hermes import todo_store as ts
+    ts.upsert_from_contract(
+        [{
+            "key": key,
+            "text": text,
+            "priority": priority,
+            "recurring": recurring,
+            "source_dates": source_dates if source_dates is not None else [for_date],
+        }],
+        for_date,
+    )
+
+
+class TestRenderTodoSectionFromStore:
+    """render_todo_section() renders todo_store's open rows, independent of
+    the journal contract's own todos[] array (see the module's own docstring
+    on render_todo_section for the "store is authoritative" rationale)."""
+
+    def test_ignores_raw_contract_todos_entirely(self):
+        data = _journal_data(
+            todos=[{"content": "Should never appear", "confidence": 0.99, "priority": 10, "category": "dev"}]
+        )
+        section = render_todo_section(data, "")
+        assert "Should never appear" not in section
+        assert "(no open todos)" in section
+
+    def test_only_open_rows_render_snoozed_done_dismissed_excluded(self):
+        from services.hermes import todo_store as ts
+        ts.upsert_from_contract(
+            [
+                {"key": "open-1", "text": "Open task alpha", "priority": "high", "source_dates": ["2026-07-14"]},
+                {"key": "snooze-1", "text": "Snoozed task", "priority": "medium", "source_dates": ["2026-07-14"]},
+                {"key": "done-1", "text": "Done task", "priority": "low", "source_dates": ["2026-07-14"]},
+                {"key": "dismiss-1", "text": "Dismissed task", "priority": "low", "source_dates": ["2026-07-14"]},
+            ],
+            "2026-07-14",
+        )
+        ts.close_todo("snooze-1", "snooze", "test", snooze_until="2026-08-01")
+        ts.close_todo("done-1", "done", "test")
+        ts.close_todo("dismiss-1", "dismiss", "test")
+
+        section = render_todo_section(_journal_data(for_date="2026-07-14"), "")
+
+        assert "Open task alpha" in section
+        assert "Snoozed task" not in section
+        assert "Done task" not in section
+        assert "Dismissed task" not in section
+        assert "To-do · 1 open" in section
+
+    def test_header_shows_correct_open_count(self):
+        for i in range(3):
+            _seed_todo(f"k{i}", text=f"task {i}")
+        section = render_todo_section(_journal_data(for_date="2026-07-14"), "")
+        assert "To-do · 3 open" in section
+
+    def test_output_wrapped_in_fenced_code_block(self):
+        _seed_todo("k1", text="task")
+        section = render_todo_section(_journal_data(for_date="2026-07-14"), "")
+        assert section.count("```") == 2
+        assert section.index("```") < section.rindex("```")
+
+    def test_empty_store_still_wrapped_in_fenced_code_block(self):
+        section = render_todo_section(_journal_data(), "")
+        assert section.count("```") == 2
+        assert "(no open todos)" in section
+
+    def test_high_priority_gets_bang_glyph(self):
+        _seed_todo("hi", text="high prio item", priority="high")
+        section = render_todo_section(_journal_data(for_date="2026-07-14"), "")
+        line = next(l for l in section.splitlines() if "high prio item" in l)
+        assert line.strip().startswith("!")
+
+    def test_non_high_priority_gets_dot_glyph(self):
+        _seed_todo("med", text="medium prio item", priority="medium")
+        _seed_todo("lo", text="low prio item", priority="low")
+        section = render_todo_section(_journal_data(for_date="2026-07-14"), "")
+        med_line = next(l for l in section.splitlines() if "medium prio item" in l)
+        lo_line = next(l for l in section.splitlines() if "low prio item" in l)
+        assert med_line.strip().startswith("·")
+        assert lo_line.strip().startswith("·")
+
+    def test_row_contains_the_stable_key(self):
+        _seed_todo("stable-key-42", text="task text")
+        section = render_todo_section(_journal_data(for_date="2026-07-14"), "")
+        assert "stable-key-42" in section
+
+    def test_text_truncated_to_configured_max_chars(self, monkeypatch, tmp_path):
+        long_text = "x" * 100
+        _seed_todo("k1", text=long_text)
+
+        cfg_path = tmp_path / "brief_render.yaml"
+        cfg_path.write_text("todo_section:\n  text_max_chars: 10\n", encoding="utf-8")
+        monkeypatch.setenv("BRIEF_RENDER_CONFIG", str(cfg_path))
+
+        section = render_todo_section(_journal_data(for_date="2026-07-14"), "")
+        assert long_text not in section
+        assert ("x" * 9 + "…") in section
+
+
+class TestRecencyFormatting:
+    """↻ {N}d for recurring todos (days since first_seen), else the latest
+    source_dates entry as MM-DD."""
+
+    def test_recurring_shows_days_since_first_seen(self):
+        _seed_todo("rk", text="recurring task", for_date="2026-07-01", recurring=True)
+        section = render_todo_section(_journal_data(for_date="2026-07-15"), "")
+        assert "↻ 14d" in section
+
+    def test_recurring_zero_days_on_the_first_day(self):
+        _seed_todo("rk", text="brand new recurring task", for_date="2026-07-15", recurring=True)
+        section = render_todo_section(_journal_data(for_date="2026-07-15"), "")
+        assert "↻ 0d" in section
+
+    def test_non_recurring_shows_max_source_date_as_mm_dd(self):
+        _seed_todo("nk", text="non recurring task", for_date="2026-07-14",
+                    source_dates=["2026-07-10", "2026-07-12"])
+        section = render_todo_section(_journal_data(for_date="2026-07-14"), "")
+        assert "07-12" in section
+
+    def test_non_recurring_no_source_dates_shows_question_mark(self):
+        # Insert directly via upsert with an empty source_dates list.
+        from services.hermes import todo_store as ts
+        ts.upsert_from_contract(
+            [{"key": "nk", "text": "no dates task", "priority": "medium", "source_dates": []}],
+            "2026-07-14",
+        )
+        section = render_todo_section(_journal_data(for_date="2026-07-14"), "")
+        line = next(l for l in section.splitlines() if "no dates task" in l)
+        assert line.rstrip().endswith("?")
+
+
+class TestBriefRenderConfigFieldToggles:
+    """config/brief_render.yaml's todo_section.fields toggles which columns
+    render; text_max_chars/header_format are also configurable. Missing or
+    unreadable config falls back to code defaults without crashing."""
+
+    def test_key_false_omits_key_from_row(self, monkeypatch, tmp_path):
+        _seed_todo("should-not-appear-42", text="task")
+
+        cfg_path = tmp_path / "brief_render.yaml"
+        cfg_path.write_text("todo_section:\n  fields:\n    key: false\n", encoding="utf-8")
+        monkeypatch.setenv("BRIEF_RENDER_CONFIG", str(cfg_path))
+
+        section = render_todo_section(_journal_data(for_date="2026-07-14"), "")
+        assert "should-not-appear-42" not in section
+
+    def test_recency_false_omits_recency(self, monkeypatch, tmp_path):
+        _seed_todo("k1", text="task", source_dates=["2026-01-01"])
+
+        cfg_path = tmp_path / "brief_render.yaml"
+        cfg_path.write_text("todo_section:\n  fields:\n    recency: false\n", encoding="utf-8")
+        monkeypatch.setenv("BRIEF_RENDER_CONFIG", str(cfg_path))
+
+        section = render_todo_section(_journal_data(for_date="2026-07-14"), "")
+        assert "01-01" not in section
+
+    def test_glyph_false_omits_glyph(self, monkeypatch, tmp_path):
+        _seed_todo("k1", text="high prio task", priority="high")
+
+        cfg_path = tmp_path / "brief_render.yaml"
+        cfg_path.write_text("todo_section:\n  fields:\n    glyph: false\n", encoding="utf-8")
+        monkeypatch.setenv("BRIEF_RENDER_CONFIG", str(cfg_path))
+
+        section = render_todo_section(_journal_data(for_date="2026-07-14"), "")
+        line = next(l for l in section.splitlines() if "high prio task" in l)
+        assert not line.strip().startswith("!")
+
+    def test_text_false_omits_text(self, monkeypatch, tmp_path):
+        _seed_todo("k1", text="unique-omitted-text-marker")
+
+        cfg_path = tmp_path / "brief_render.yaml"
+        cfg_path.write_text("todo_section:\n  fields:\n    text: false\n", encoding="utf-8")
+        monkeypatch.setenv("BRIEF_RENDER_CONFIG", str(cfg_path))
+
+        section = render_todo_section(_journal_data(for_date="2026-07-14"), "")
+        assert "unique-omitted-text-marker" not in section
+
+    def test_missing_config_file_falls_back_to_defaults_no_crash(self, monkeypatch, tmp_path):
+        _seed_todo("k1", text="task", priority="high")
+        monkeypatch.setenv("BRIEF_RENDER_CONFIG", str(tmp_path / "does-not-exist.yaml"))
+
+        section = render_todo_section(_journal_data(for_date="2026-07-14"), "")
+        assert "k1" in section
+        assert "!" in section  # glyph field defaults to on
+
+    def test_unparsable_config_file_falls_back_to_defaults_no_crash(self, monkeypatch, tmp_path):
+        _seed_todo("k1", text="task", priority="high")
+        cfg_path = tmp_path / "brief_render.yaml"
+        cfg_path.write_text("not: valid: yaml: [[[", encoding="utf-8")
+        monkeypatch.setenv("BRIEF_RENDER_CONFIG", str(cfg_path))
+
+        section = render_todo_section(_journal_data(for_date="2026-07-14"), "")
+        assert "k1" in section
+
+    def test_custom_header_format_applied(self, monkeypatch, tmp_path):
+        _seed_todo("k1", text="task")
+        cfg_path = tmp_path / "brief_render.yaml"
+        cfg_path.write_text(
+            "todo_section:\n  header_format: 'Custom header ({count})'\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("BRIEF_RENDER_CONFIG", str(cfg_path))
+
+        section = render_todo_section(_journal_data(for_date="2026-07-14"), "")
+        assert "Custom header (1)" in section
+
+
+class TestAwayMarker:
+    """A one-line away-mode marker appears near the top of the brief when
+    away_mode.is_away() is true; absent entirely otherwise."""
+
+    def test_marker_present_and_mentions_until_date_when_away(self):
+        from services.hermes import away_mode
+        away_mode.set_away(until="2026-07-20")
+
+        brief = compose_brief(_journal_data(for_date="2026-07-15"), "", None, "x", None, "x")
+
+        assert "🌙" in brief
+        assert "2026-07-20" in brief
+
+    def test_marker_absent_when_not_away(self):
+        brief = compose_brief(_journal_data(for_date="2026-07-15"), "", None, "x", None, "x")
+        assert "🌙" not in brief
+
+    def test_marker_absent_after_away_mode_cleared(self):
+        from services.hermes import away_mode
+        away_mode.set_away(until="2026-07-20")
+        away_mode.clear_away()
+
+        brief = compose_brief(_journal_data(for_date="2026-07-15"), "", None, "x", None, "x")
+        assert "🌙" not in brief
+
+    def test_marker_appears_before_section_1(self):
+        from services.hermes import away_mode
+        away_mode.set_away(until="2026-07-20")
+
+        brief = compose_brief(_journal_data(for_date="2026-07-15"), "", None, "x", None, "x")
+
+        assert brief.index("🌙") < brief.index("Section 1")
+
+
+class TestNoForbiddenFieldsInTodoSection:
+    """category/status/id/confidence/origin are intentionally never rendered
+    in the todo section, regardless of what the store row carries."""
+
+    def test_forbidden_fields_never_appear(self):
+        from services.hermes import todo_store as ts
+        ts.upsert_from_contract(
+            [{
+                "key": "abc123",
+                "text": "a task about something unrelated",
+                "priority": "high",
+                "category": "dev",
+                "confidence": 0.95,
+                "source_dates": ["2026-07-14"],
+            }],
+            "2026-07-14",
+        )
+        section = render_todo_section(_journal_data(for_date="2026-07-14"), "")
+        assert "category" not in section
+        assert "confidence" not in section
+        assert "origin" not in section
+        assert "0.95" not in section
+        # "status" as a rendered field/value, not as an incidental substring
+        # of some other word.
+        assert "status" not in section.lower()

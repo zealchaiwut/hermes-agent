@@ -453,7 +453,12 @@ class TestMissingContractsExitZero:
             capture_output=True, text=True,
         )
         assert result.returncode == 0, f"missing contracts must not cause a non-zero exit: {result.stderr}"
-        assert result.stdout.count("⚠️ unavailable") == 4, "all four sections should degrade"
+        # Only 3 of the 4 sections degrade to "⚠️ unavailable" — the todo
+        # section (Section 2) now renders from services.hermes.todo_store
+        # regardless of journal-contract availability, so an empty store
+        # renders "(no open todos)" rather than an unavailable marker.
+        assert result.stdout.count("⚠️ unavailable") == 3, "the 3 non-todo sections should degrade"
+        assert "(no open todos)" in result.stdout
 
     def test_empty_contracts_list_exits_zero_degraded(self, tmp_path):
         home = tmp_path / ".hermes"
@@ -478,7 +483,10 @@ class TestMissingContractsExitZero:
             capture_output=True, text=True,
         )
         assert result.returncode == 0
-        assert result.stdout.count("⚠️ unavailable") == 4
+        # See test_no_contracts_key_at_all_exits_zero_degraded above — the
+        # todo section no longer contributes an "⚠️ unavailable" marker.
+        assert result.stdout.count("⚠️ unavailable") == 3
+        assert "(no open todos)" in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -790,3 +798,169 @@ class TestExistingJobsUnaffected:
         next_bkk = next_dt.astimezone(bkk)
         assert next_bkk.hour == 6, f"next run should be at 06:xx Bangkok, got {next_bkk}"
         assert next_bkk.minute == 0
+
+
+# ---------------------------------------------------------------------------
+# Fence-aware chunking — the morning brief's todo section is a fenced
+# ```...``` code block; a naive per-line/per-char splitter (the old
+# behavior) can land a chunk boundary inside the fence, leaving one Discord
+# message with an unclosed ``` and the next with a stray closing ```. The
+# fence-aware splitter (_extract_fenced_segments / _split_fenced_block) is
+# supposed to prevent that: every produced chunk must have a balanced
+# (even) count of ``` markers.
+# ---------------------------------------------------------------------------
+
+class TestFencedChunkSplitting:
+    @staticmethod
+    def _import_discord_module():
+        import importlib
+        return importlib.import_module("cron.scripts.morning_brief_discord")
+
+    @staticmethod
+    def _assert_all_chunks_fence_balanced(chunks):
+        for i, chunk in enumerate(chunks):
+            count = chunk.count("```")
+            assert count % 2 == 0, (
+                f"chunk {i} has an odd number of \\`\\`\\` markers ({count}): {chunk!r}"
+            )
+
+    def test_short_brief_with_small_fenced_block_is_one_chunk(self):
+        """Regression: a normal-sized brief containing a small fenced todo
+        block still produces exactly one chunk, unchanged from before the
+        fence-aware splitter was added."""
+        mod = self._import_discord_module()
+        text = (
+            "# Morning Brief\n\n"
+            "## Section 2 — Todo List\n\n"
+            "```\n"
+            "To-do · 2 open · /done <key>\n\n"
+            "  ! key-one   Fix the thing              07-14\n"
+            "  · key-two   Review the other thing      07-13\n"
+            "```\n"
+        )
+        chunks = mod._split_into_chunks(text, max_chars=1900)
+        assert len(chunks) == 1
+        assert chunks[0] == text
+        self._assert_all_chunks_fence_balanced(chunks)
+
+    def test_fence_never_broken_when_it_straddles_the_naive_split_point(self):
+        """A fenced block that fits whole under max_chars, but whose
+        start-to-end span crosses the max_chars boundary once preceding
+        text is included, must stay intact as a single atomic segment — the
+        whole fence moves to the next chunk rather than being torn (the bug
+        a naive per-line splitter would have hit)."""
+        mod = self._import_discord_module()
+        max_chars = 500
+        preamble = "\n".join(f"padding line {i}" for i in range(6))
+        fence_lines = "\n".join(
+            f"  · key-{i:03d}  todo body text here   07-{(i % 28) + 1:02d}" for i in range(10)
+        )
+        fenced_block = f"```\n{fence_lines}\n```"
+        text = f"{preamble}\n{fenced_block}\nafter-fence-marker"
+
+        assert len(fenced_block) < max_chars, "block itself must fit whole in one chunk"
+        assert len(preamble) + 1 + len(fenced_block) > max_chars, "must straddle the naive boundary"
+
+        chunks = mod._split_into_chunks(text, max_chars=max_chars)
+
+        self._assert_all_chunks_fence_balanced(chunks)
+        fence_chunk = next(c for c in chunks if "```" in c)
+        assert fence_chunk.count("```") == 2
+        for line in fence_lines.splitlines():
+            assert line in fence_chunk
+        # No oversized-block hard-splitting was needed here, so rejoining
+        # every chunk on "\n" must reproduce the original text exactly.
+        assert "\n".join(chunks) == text
+
+    def test_oversized_fenced_block_is_hard_split_with_rewrapped_fences(self):
+        """A fenced block bigger than max_chars on its own can't stay
+        atomic — it's torn into pieces, but every piece is re-wrapped in its
+        own ``` pair (documented behavior of _split_fenced_block) so it
+        still renders monospace, and every resulting chunk stays
+        fence-balanced."""
+        mod = self._import_discord_module()
+        max_chars = 100
+        fence_lines = "\n".join(f"line-{i:03d} " + ("x" * 20) for i in range(30))
+        fenced_block = f"```\n{fence_lines}\n```"
+        assert len(fenced_block) > max_chars
+
+        chunks = mod._split_into_chunks(fenced_block, max_chars=max_chars)
+
+        assert len(chunks) > 1
+        self._assert_all_chunks_fence_balanced(chunks)
+        for chunk in chunks:
+            assert len(chunk) <= max_chars
+
+        # Stripping each chunk's re-wrapped outer fence and rejoining
+        # reproduces every original inner line in order — no content lost
+        # or duplicated despite the hard split.
+        reassembled_lines = []
+        for chunk in chunks:
+            inner = chunk.split("\n")[1:-1]
+            reassembled_lines.extend(inner)
+        assert "\n".join(reassembled_lines) == fence_lines
+
+    def test_full_synthetic_brief_with_oversized_todo_block_all_chunks_balanced(self):
+        """End-to-end: a realistic brief shape (prose sections + a large
+        fenced todo block, the exact shape render_todo_section() produces)
+        chunked at the real DISCORD_MAX_CHARS budget — every produced chunk
+        must be fence-balanced and every todo key must survive somewhere in
+        the reassembled output."""
+        mod = self._import_discord_module()
+        todo_rows = "\n".join(
+            f"  {'!' if i % 5 == 0 else '·'} key-{i:04d}          "
+            f"a reasonably long todo description number {i}           07-{(i % 28) + 1:02d}"
+            for i in range(120)
+        )
+        text = (
+            "# Morning Brief\n\n"
+            "## Section 1 — Journal Reflection\n\n"
+            + "\n".join(f"reflection line {i}" for i in range(40))
+            + "\n\n## Section 2 — Todo List\n\n"
+            + f"```\nTo-do · 120 open · /done <key>\n\n{todo_rows}\n```\n\n"
+            "## Section 3 — Training\n\n- Easy 30-min run.\n\n"
+            "## Section 4 — Overnight Dev Report\n\n**Completed:** (none)\n"
+        )
+        assert len(text) > mod.DISCORD_MAX_CHARS
+
+        chunks = mod._split_into_chunks(text, max_chars=mod.DISCORD_MAX_CHARS)
+
+        assert len(chunks) > 1
+        self._assert_all_chunks_fence_balanced(chunks)
+        for chunk in chunks:
+            assert len(chunk) <= mod.DISCORD_MAX_CHARS
+        joined = "\n".join(chunks)
+        for i in range(120):
+            assert f"key-{i:04d}" in joined
+
+    def test_unterminated_fence_falls_back_to_per_line_segments(self):
+        """A fence with no closing ``` must not swallow the rest of the text
+        as one giant atomic block — it degrades to per-line splitting like
+        the surrounding text (the documented fallback in
+        _extract_fenced_segments)."""
+        mod = self._import_discord_module()
+        text = "before\n```\nunterminated line one\nunterminated line two\nafter-should-still-split"
+        segments = mod._extract_fenced_segments(text)
+        assert segments == [
+            "before",
+            "```",
+            "unterminated line one",
+            "unterminated line two",
+            "after-should-still-split",
+        ]
+
+    def test_two_small_fences_each_stay_atomic_and_balanced(self):
+        """Two separate small fenced blocks, neither individually oversized,
+        both end up fence-balanced across however many chunks they land in."""
+        mod = self._import_discord_module()
+        max_chars = 60
+        block_a = "```\nrow-a1\nrow-a2\n```"
+        block_b = "```\nrow-b1\nrow-b2\n```"
+        text = f"intro\n{block_a}\nmiddle\n{block_b}\noutro"
+
+        chunks = mod._split_into_chunks(text, max_chars=max_chars)
+
+        self._assert_all_chunks_fence_balanced(chunks)
+        joined = "\n".join(chunks)
+        for marker in ("row-a1", "row-a2", "row-b1", "row-b2"):
+            assert marker in joined

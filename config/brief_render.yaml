@@ -1,0 +1,19 @@
+# Morning brief render config — todo section field visibility & layout.
+#
+# Read by scripts/morning_brief_composer.py at render time. Path is
+# resolvable via the BRIEF_RENDER_CONFIG env var, defaulting to this file
+# (<repo_root>/config/brief_render.yaml). Missing/unreadable file falls back
+# to these same defaults in code — never crashes the scheduled brief.
+#
+# Default-deny field visibility: only fields explicitly set to `true` render
+# in each todo row. category/status/id/confidence/origin are intentionally
+# never rendered here and are not configurable — they are not part of the
+# user-facing todo row.
+todo_section:
+  fields:
+    glyph: true
+    key: true
+    text: true
+    recency: true
+  text_max_chars: 32
+  header_format: "To-do · {count} open · /done <key>"
