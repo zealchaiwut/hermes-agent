@@ -22,3 +22,13 @@ def get_perf_coach_token() -> Optional[str]:
 def get_commander_api_url() -> Optional[str]:
     """Return the Commander dashboard API base URL from COMMANDER_API_URL, or None if unset."""
     return os.environ.get("COMMANDER_API_URL") or None
+
+
+def get_perf_coach_user() -> Optional[str]:
+    """Return the perf-coach username from PERF_COACH_USER, or None if unset.
+
+    When set, this is appended as the ``user`` query parameter on
+    feel-entry requests. When unset, the worker falls back to its
+    single-active-user resolution.
+    """
+    return os.environ.get("PERF_COACH_USER") or None
