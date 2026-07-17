@@ -52,6 +52,7 @@ before the script will run them at all.
 - Anything else touching Commander's ~271 routes — reachable via the
   generic client, catalogued in `references/endpoints.md`, or Commander's
   own docs (see Canonical Docs below)
+- Use this to expand the morning brief's Training/Dev Report section when the user asks follow-ups.
 
 ## Prerequisites
 
