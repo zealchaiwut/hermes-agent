@@ -64,6 +64,55 @@ Journal approvals: `DISCORD_APPROVALS_HOUR`/`_MINUTE` +
 `DISCORD_TODO_CLOSURE_HOUR`/`_MINUTE`. Both post to
 `discord.morning_brief_channel_id`.
 
+## Nudges
+
+Three **opt-in** schedulers that send informational prompts when your todo list
+needs attention. All three are disabled by default — each starts only when its
+`*_HOUR` variable is set. All three **respect away mode**: no nudge is sent
+while `/away-on` is active.
+
+### Stale-todo threshold nudge
+
+Fires **daily** at the configured UTC time. Posts a `TodoClosureView` for any
+todos that have not moved in `DISCORD_NUDGE_STALE_DAYS` days (default 5).
+
+| Variable | Description |
+| --- | --- |
+| `DISCORD_NUDGE_STALE_HOUR` | UTC hour to fire (required to enable; e.g. `9`) |
+| `DISCORD_NUDGE_STALE_MINUTE` | UTC minute (default `0`) |
+
+Optional companion: `DISCORD_NUDGE_STALE_DAYS` — stale threshold in days
+(default `5`).
+
+### Idle-day check-in nudge
+
+Fires **daily** at the configured UTC time. Posts a `TodoClosureView` only
+when **both** conditions hold: no todos were closed today AND at least one
+open todo exists. Silent skip otherwise.
+
+| Variable | Description |
+| --- | --- |
+| `DISCORD_NUDGE_IDLE_HOUR` | UTC hour to fire (required; **both** vars must be set) |
+| `DISCORD_NUDGE_IDLE_MINUTE` | UTC minute (required; **both** vars must be set) |
+
+### Weekly reset nudge
+
+Fires **daily** at the configured UTC time but only **acts** on the configured
+day-of-week (`DISCORD_NUDGE_WEEKLY_DAY`, 0=Monday…6=Sunday, default `6` =
+Sunday). Posts a `TodoClosureView` for all open todos on the matching day.
+
+| Variable | Description |
+| --- | --- |
+| `DISCORD_NUDGE_WEEKLY_HOUR` | UTC hour to fire (required to enable; e.g. `8`) |
+| `DISCORD_NUDGE_WEEKLY_MINUTE` | UTC minute (default `0`) |
+
+Optional companion: `DISCORD_NUDGE_WEEKLY_DAY` — day of week to fire
+(0=Monday…6=Sunday, default `6`).
+
+All nudge prompts post to `discord.morning_brief_channel_id` and show the
+same `TodoClosureView` interactive control — use `/done`, `/dismiss`, or
+`/snooze` to act on the highlighted todos.
+
 ## Docs
 
 - [`docs/PRODUCT.md`](docs/PRODUCT.md), [`docs/DESIGN.md`](docs/DESIGN.md) — product/design contracts
