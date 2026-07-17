@@ -52,6 +52,7 @@ before the script will run them at all.
 - Anything else touching Commander's ~271 routes — reachable via the
   generic client, catalogued in `references/endpoints.md`, or Commander's
   own docs (see Canonical Docs below)
+- Use this to expand the morning brief's Training/Dev Report section when the user asks follow-ups.
 
 ## Prerequisites
 
@@ -159,6 +160,7 @@ are capped at 15 items so a single call can't blow the context budget.
 | `preflight <label> --project <repo>` | `GET .../preflight` | Full preflight report before dispatch |
 | `rerun_preview <label> --project <owner/repo>` | `GET .../rerun-preview` | Preview what re-running a sprint would do (SAFE) — needs full `owner/repo`, not bare name |
 | `milestones <repo>` | `GET /api/projects/{slug}/milestones` | List milestones + `active` one — check before `plan-next` |
+| `dev_report` | `GET /api/dev-report` | Morning brief dev report — expand the brief's Dev Report section |
 | `spec [--path <substr>]` | `GET /openapi.json` | Live schema — the source of truth if this doc drifts |
 | `stream <path> [--max-seconds N]` | any SSE route | Capped read of a live stream (default 20s) |
 | `call <METHOD> <path> [--json '<body>'] [--confirm]` | any of the ~271 routes | Escape hatch — see `references/endpoints.md` or Canonical Docs |
