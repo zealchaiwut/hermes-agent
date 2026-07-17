@@ -177,6 +177,33 @@ The Discord gateway can post a nightly overnight-sprint prompt with **Start / Sk
 | `DISCORD_HOME_CHANNEL` | Discord channel ID to post the prompt |
 | `DISCORD_BEDTIME_TIMEOUT` | Seconds to wait for a click (default `300`) |
 
+### Discord LifeOps Nudge Schedulers
+
+Three schedulers in `services/lifeops_discord_adapter.py` surface productivity nudges via Discord. All are opt-in via environment variables and respect away mode.
+
+**Stale-Todo Nudge** — posts a daily reminder for todos not seen within a configurable window:
+
+| Variable | Description |
+| --- | --- |
+| `DISCORD_NUDGE_STALE_HOUR` | UTC hour to fire — required to enable (e.g. `9`) |
+| `DISCORD_NUDGE_STALE_MINUTE` | UTC minute (default `0`) |
+| `DISCORD_NUDGE_STALE_DAYS` | Days before a todo is stale (default `5`) |
+
+**Idle-Day Nudge** — posts once if the user has open todos but hasn't closed any today:
+
+| Variable | Description |
+| --- | --- |
+| `DISCORD_NUDGE_IDLE_HOUR` | Local hour to fire — required to enable (e.g. `20`) |
+| `DISCORD_NUDGE_IDLE_MINUTE` | Local minute — required to enable (e.g. `0`) |
+
+**Weekly Reset Nudge** — posts the full open-todo list once a week with an interactive `TodoClosureView` (select + Mark Done / Dismiss / Snooze buttons):
+
+| Variable | Description |
+| --- | --- |
+| `DISCORD_NUDGE_WEEKLY_HOUR` | Local hour to fire — required to enable (e.g. `10`) |
+| `DISCORD_NUDGE_WEEKLY_MINUTE` | Local minute — required to enable (e.g. `0`) |
+| `DISCORD_NUDGE_WEEKLY_DAY` | Weekday: `0`=Monday … `6`=Sunday (default `6`) |
+
 For the full command lists, see the [CLI guide](https://hermes-agent.nousresearch.com/docs/user-guide/cli) and the [Messaging Gateway guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging).
 
 ---

@@ -1,5 +1,13 @@
 # Changelog
 
+## Sprint 4
+
+- #48: Add get_stale_todos() to todo_store.py
+- #49: Add daily stale-todo nudge scheduler to LifeOpsDiscordAdapter
+- #50: Add idle-day nudge when no todos closed today
+- #51: Add weekly reset nudge with TodoClosureView
+- #52: Wire nudge schedulers into adapter lifecycle and document env vars
+
 ## Sprint 1.3
 
 - #6: Add M2 morning-brief composer script
