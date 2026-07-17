@@ -424,11 +424,45 @@ def _render_v3_week_plan_block(week_plan: list) -> str:
     return "\n".join(rows)
 
 
+def _render_lever(lever: dict) -> str:
+    """Format one lever dict as 'name state [until date]'."""
+    name = lever.get("name", "")
+    state = lever.get("state", "")
+    until = lever.get("until")
+    if until:
+        return f"{name} {state} until {until}"
+    return f"{name} {state}"
+
+
+def _render_coach_block(coach: dict) -> list[str]:
+    """Render the coach sub-block: directive / projection / levers lines."""
+    lines: list[str] = []
+    directive = coach.get("directive")
+    if directive:
+        lines.append(f"**Coach:** {directive}")
+    projection = coach.get("projection")
+    if projection:
+        lines.append(f"_{projection}_")
+    levers = coach.get("levers")
+    if levers is not None:
+        if isinstance(levers, str):
+            lines.append(f"Levers: {levers}")
+        elif isinstance(levers, list):
+            parts = [_render_lever(l) if isinstance(l, dict) else str(l) for l in levers]
+            lines.append(f"Levers: {' · '.join(parts)}")
+    return lines
+
+
 def render_training_section(data: dict | None, reason: str) -> str:
     lines = ["## Section 3 — Training\n"]
     if data is None:
         lines.append(_unavailable_block(reason))
         return "\n".join(lines)
+
+    # Coach block (issue #63) — rendered at the top, before v3 blocks
+    coach = data.get("coach")
+    if isinstance(coach, dict):
+        lines.extend(_render_coach_block(coach))
 
     # v3 new blocks (AC-1, AC-2, AC-3)
     v3_blocks: list[str] = []
