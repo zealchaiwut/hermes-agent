@@ -1,8 +1,8 @@
-"""LifeOps Discord adapter: stale-todo nudge scheduler.
+"""LifeOps Discord adapter: stale-todo, idle-day, and weekly-reset nudge schedulers.
 
 Provides LifeOpsDiscordAdapter, a standalone class that owns the daily
-stale-todo nudge scheduler, and TodoClosureView, the Discord UI view for
-acting on stale todos (select → Mark Done / Dismiss / Snooze).
+stale-todo nudge scheduler, idle-day nudge scheduler, and weekly reset
+nudge scheduler. TodoClosureView is the Discord UI view for acting on todos.
 
 Mirrors the _start_bedtime_scheduler / _start_approvals_scheduler pattern
 in plugins/platforms/discord/adapter.py.
@@ -10,6 +10,7 @@ in plugins/platforms/discord/adapter.py.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import os
 from typing import Optional
@@ -79,6 +80,39 @@ def _read_stale_todo_nudge_config() -> dict:
     return {"enabled": True, "hour": hour, "minute": minute, "threshold_days": threshold_days}
 
 
+def _read_weekly_nudge_config() -> dict:
+    """Read weekly-reset nudge config from environment variables.
+
+    Both DISCORD_NUDGE_WEEKLY_HOUR and DISCORD_NUDGE_WEEKLY_MINUTE must be set
+    and parseable as integers; if either is missing the scheduler is disabled.
+    DISCORD_NUDGE_WEEKLY_DAY defaults to 6 (Sunday) when unset.
+
+    Keys:
+        enabled — True only when HOUR and MINUTE are both set and parseable
+        day     — int, weekday 0=Monday … 6=Sunday (default 6)
+        hour    — int, local hour (0-23)
+        minute  — int, local minute (0-59)
+    """
+    raw_hour = os.getenv("DISCORD_NUDGE_WEEKLY_HOUR", "").strip()
+    raw_minute = os.getenv("DISCORD_NUDGE_WEEKLY_MINUTE", "").strip()
+    if not raw_hour or not raw_minute:
+        return {"enabled": False, "day": 6, "hour": 0, "minute": 0}
+    try:
+        hour = int(raw_hour)
+    except ValueError:
+        return {"enabled": False, "day": 6, "hour": 0, "minute": 0}
+    try:
+        minute = int(raw_minute)
+    except ValueError:
+        return {"enabled": False, "day": 6, "hour": 0, "minute": 0}
+    raw_day = os.getenv("DISCORD_NUDGE_WEEKLY_DAY", "6").strip()
+    try:
+        day = int(raw_day)
+    except ValueError:
+        day = 6
+    return {"enabled": True, "day": day, "hour": hour, "minute": minute}
+
+
 class LifeOpsDiscordAdapter:
     """Stale-todo nudge scheduler for a Discord bot.
 
@@ -104,6 +138,7 @@ class LifeOpsDiscordAdapter:
         self.name = name
         self._nudge_task: Optional[asyncio.Task] = None
         self._idle_task: Optional[asyncio.Task] = None
+        self._weekly_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
     # Scheduler lifecycle
@@ -316,6 +351,113 @@ class LifeOpsDiscordAdapter:
         self._idle_task = None
 
     # ------------------------------------------------------------------
+    # Weekly reset nudge scheduler
+    # ------------------------------------------------------------------
+
+    def _start_weekly_nudge_scheduler(self) -> None:
+        """Start the weekly-reset nudge scheduler if HOUR and MINUTE are set.
+
+        Idempotent: a second call while the task is live is a no-op.
+        """
+        cfg = _read_weekly_nudge_config()
+        if not cfg["enabled"]:
+            return
+        if self._weekly_task and not self._weekly_task.done():
+            return
+        self._weekly_task = asyncio.create_task(
+            self._weekly_nudge_scheduler_loop(cfg)
+        )
+        logger.info(
+            "[%s] Weekly-reset nudge scheduler started (fire day=%d at %02d:%02d local)",
+            self.name, cfg["day"], cfg["hour"], cfg["minute"],
+        )
+
+    async def _weekly_nudge_scheduler_loop(self, cfg: dict) -> None:
+        """Loop indefinitely, waking once per 24 h and checking the weekday."""
+        while True:
+            now = datetime.datetime.now()
+            target = now.replace(
+                hour=cfg["hour"], minute=cfg["minute"], second=0, microsecond=0
+            )
+            if target <= now:
+                target += datetime.timedelta(days=1)
+            delay = (target - now).total_seconds()
+            logger.debug(
+                "[%s] Weekly-reset nudge: sleeping %.0fs until %s local",
+                self.name, delay, target.isoformat(),
+            )
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+
+            try:
+                await self._fire_weekly_nudge(cfg)
+            except Exception as exc:
+                logger.error(
+                    "[%s] Weekly-reset nudge: unexpected error: %s", self.name, exc
+                )
+
+    async def _fire_weekly_nudge(self, cfg: dict) -> None:
+        """Post the weekly-reset nudge if today is the configured weekday.
+
+        Skips silently when:
+        - current weekday != cfg["day"]
+        - away_mode.is_away() is True
+        - get_open_todos() returns an empty list
+        - the channel is not reachable
+        """
+        now = datetime.datetime.now()
+        if now.weekday() != cfg["day"]:
+            logger.debug(
+                "[%s] Weekly-reset nudge: weekday %d != configured %d; skipping",
+                self.name, now.weekday(), cfg["day"],
+            )
+            return
+
+        if self._away_mode.is_away():
+            logger.debug("[%s] Weekly-reset nudge: away mode active; skipping", self.name)
+            return
+
+        open_todos = self._todo_store.get_open_todos()
+        if not open_todos:
+            logger.info("[%s] Weekly-reset nudge: no open todos; skipping", self.name)
+            return
+
+        if not self._channel_id or not self._client:
+            logger.warning(
+                "[%s] Weekly-reset nudge: channel not configured; skipping", self.name
+            )
+            return
+
+        ch = self._client.get_channel(int(self._channel_id))
+        if ch is None:
+            logger.warning(
+                "[%s] Weekly-reset nudge: channel %s not found; skipping",
+                self.name, self._channel_id,
+            )
+            return
+
+        n = len(open_todos)
+        content = f"Weekly reset — {n} open todo(s)"
+        view = TodoClosureView(todos=open_todos)
+        await ch.send(content, view=view)
+        logger.info(
+            "[%s] Weekly-reset nudge posted (%d open todo(s), channel=%s)",
+            self.name, n, self._channel_id,
+        )
+
+    async def _cancel_weekly_nudge_task(self) -> None:
+        """Cancel and await the weekly-reset nudge scheduler task, if running."""
+        if self._weekly_task and not self._weekly_task.done():
+            self._weekly_task.cancel()
+            try:
+                await self._weekly_task
+            except asyncio.CancelledError:
+                pass
+        self._weekly_task = None
+
+    # ------------------------------------------------------------------
     # Lifecycle aggregates
     # ------------------------------------------------------------------
 
@@ -323,11 +465,13 @@ class LifeOpsDiscordAdapter:
         """Start all background schedulers after the bot connects."""
         self._start_stale_todo_nudge_scheduler()
         self._start_idle_day_nudge_scheduler()
+        self._start_weekly_nudge_scheduler()
 
     async def cancel_background_tasks(self) -> None:
         """Cancel all background scheduler tasks."""
         await self._cancel_stale_todo_nudge_task()
         await self._cancel_idle_day_nudge_task()
+        await self._cancel_weekly_nudge_task()
 
 
 # ---------------------------------------------------------------------------
