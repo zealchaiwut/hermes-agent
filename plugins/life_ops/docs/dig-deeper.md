@@ -29,8 +29,11 @@ Expand with the **perf-coach** skill:
 | `today` | `GET /api/plan/today` | Today's planned session |
 | `weight` | `GET /api/weight/recent` | Recent weight entries |
 | `brief` | `GET /api/brief/today` | Full training brief for today |
+| perf-coach skill | `GET /api/coach/weekly-message` | coach directive → ask why |
 
 Example follow-up: _"why this advisory"_ → perf-coach reads `training_load` and narrates the verdict.
+
+coach directive → ask why — perf-coach skill, GET /api/coach/weekly-message
 
 ## Section 4 — Overnight Dev Report
 

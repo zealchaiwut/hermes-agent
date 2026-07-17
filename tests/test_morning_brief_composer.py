@@ -1758,3 +1758,182 @@ class TestLegacyFlatSnapshot:
             "\nCost: $1.23",
         ])
         assert section == expected
+
+
+# ---------------------------------------------------------------------------
+# Issue #63: Coach block in Section 3
+# ---------------------------------------------------------------------------
+
+def _coach_full():
+    return {
+        "directive": "Keep the intensity dialed back this week.",
+        "projection": "On track to hit 70kg by October.",
+        "levers": [
+            {"name": "load", "state": "locked", "until": "31 Jul"},
+            {"name": "weight", "state": "active (measurement)"},
+        ],
+    }
+
+
+class TestCoachBlockSkipping:
+    """AC: render_training_section silently skips coach when absent or not a dict."""
+
+    def test_coach_absent_no_coach_output(self):
+        data = _perfcoach_data(advisories=[{"key": "k", "severity": "info", "text": "adv"}])
+        section = render_training_section(data, "")
+        assert "**Coach:**" not in section
+        assert "Levers:" not in section
+
+    def test_coach_string_silently_skipped(self):
+        data = _perfcoach_data(advisories=[{"key": "k", "severity": "info", "text": "adv"}], coach="invalid")
+        section = render_training_section(data, "")
+        assert "**Coach:**" not in section
+        assert "Levers:" not in section
+
+    def test_coach_int_silently_skipped(self):
+        data = _perfcoach_data(advisories=[{"key": "k", "severity": "info", "text": "adv"}], coach=42)
+        section = render_training_section(data, "")
+        assert "**Coach:**" not in section
+
+    def test_coach_list_silently_skipped(self):
+        data = _perfcoach_data(
+            advisories=[{"key": "k", "severity": "info", "text": "adv"}],
+            coach=[{"directive": "run"}],
+        )
+        section = render_training_section(data, "")
+        assert "**Coach:**" not in section
+
+    def test_malformed_coach_no_exception(self):
+        for bad in ("invalid", 42, [{"directive": "run"}], None):
+            data = _perfcoach_data(advisories=[{"key": "k", "severity": "info", "text": "adv"}], coach=bad)
+            section = render_training_section(data, "")
+            assert "**Coach:**" not in section
+
+
+class TestCoachBlockRendering:
+    """AC: when data.coach is a valid dict, the block renders at the top of Section 3."""
+
+    def test_coach_directive_line_rendered(self):
+        data = _perfcoach_data(coach={"directive": "Easy effort only this week."})
+        section = render_training_section(data, "")
+        assert "**Coach:** Easy effort only this week." in section
+
+    def test_projection_renders_as_italic_after_coach(self):
+        data = _perfcoach_data(coach={"directive": "Easy effort.", "projection": "On track for October."})
+        section = render_training_section(data, "")
+        assert "_On track for October._" in section
+        coach_pos = section.index("**Coach:**")
+        proj_pos = section.index("_On track for October._")
+        assert coach_pos < proj_pos
+
+    def test_projection_absent_no_italic_line(self):
+        data = _perfcoach_data(coach={"directive": "Easy effort."})
+        section = render_training_section(data, "")
+        italic_lines = [l.strip() for l in section.splitlines() if l.strip().startswith("_") and l.strip().endswith("_")]
+        assert len(italic_lines) == 0
+
+    def test_levers_list_of_dicts_rendered_compact(self):
+        levers = [
+            {"name": "load", "state": "locked", "until": "31 Jul"},
+            {"name": "weight", "state": "active (measurement)"},
+        ]
+        data = _perfcoach_data(coach={"directive": "Easy.", "levers": levers})
+        section = render_training_section(data, "")
+        assert "Levers: load locked until 31 Jul · weight active (measurement)" in section
+
+    def test_lever_without_until_no_until_suffix(self):
+        levers = [{"name": "load", "state": "locked"}]
+        data = _perfcoach_data(coach={"directive": "Easy.", "levers": levers})
+        section = render_training_section(data, "")
+        assert "Levers: load locked" in section
+        assert "until" not in section
+
+    def test_lever_with_null_until_no_until_suffix(self):
+        levers = [{"name": "load", "state": "locked", "until": None}]
+        data = _perfcoach_data(coach={"directive": "Easy.", "levers": levers})
+        section = render_training_section(data, "")
+        assert "Levers: load locked" in section
+        assert "until" not in section
+
+    def test_levers_as_string_rendered_verbatim(self):
+        data = _perfcoach_data(coach={"directive": "Easy.", "levers": "pre-formatted lever text"})
+        section = render_training_section(data, "")
+        assert "Levers: pre-formatted lever text" in section
+
+    def test_levers_absent_no_levers_line(self):
+        data = _perfcoach_data(coach={"directive": "Easy effort."})
+        section = render_training_section(data, "")
+        assert "Levers:" not in section
+
+    def test_coach_block_appears_before_form_weight_weekplan(self):
+        data = _perfcoach_data(
+            advisories=[{"key": "k", "severity": "info", "text": "adv"}],
+            form=_v3_form(),
+            weight=_v3_weight(),
+            week_plan=_v3_week_plan(),
+            coach=_coach_full(),
+        )
+        section = render_training_section(data, "")
+        coach_pos = section.index("**Coach:**")
+        form_pos = section.index("**Form:**")
+        weight_pos = section.index("**Weight:**")
+        week_pos = section.index("**Week plan:**")
+        assert coach_pos < form_pos
+        assert coach_pos < weight_pos
+        assert coach_pos < week_pos
+
+    def test_full_coach_block_order_directive_projection_levers(self):
+        data = _perfcoach_data(coach=_coach_full())
+        section = render_training_section(data, "")
+        coach_pos = section.index("**Coach:**")
+        proj_pos = section.index("_On track to hit 70kg by October._")
+        lever_pos = section.index("Levers:")
+        assert coach_pos < proj_pos < lever_pos
+
+    def test_coach_only_directive_no_projection_no_levers(self):
+        data = _perfcoach_data(coach={"directive": "Keep going."})
+        section = render_training_section(data, "")
+        assert "**Coach:** Keep going." in section
+        italic_lines = [l.strip() for l in section.splitlines() if l.strip().startswith("_") and l.strip().endswith("_")]
+        assert len(italic_lines) == 0
+        assert "Levers:" not in section
+
+    def test_coach_missing_levers_no_levers_line(self):
+        data = _perfcoach_data(coach={"directive": "Easy.", "projection": "Looks good."})
+        section = render_training_section(data, "")
+        assert "_Looks good._" in section
+        assert "Levers:" not in section
+
+
+class TestCoachNoCoachSnapshot:
+    """AC: fixture without 'coach' produces byte-identical output to the current baseline."""
+
+    _V2_ADVISORIES = [
+        {"key": "run", "severity": "info", "text": "Easy 30-min run."},
+        {"key": "load", "severity": "warn", "text": "High load this week."},
+    ]
+
+    def test_no_coach_field_v2_output_byte_identical(self):
+        data = _perfcoach_data(advisories=self._V2_ADVISORIES)
+        section = render_training_section(data, "")
+        expected = "\n".join([
+            "## Section 3 — Training\n",
+            "- Easy 30-min run.",
+            "- ⚠️ High load this week.",
+        ])
+        assert section == expected
+
+
+class TestDigDeeperCoachRow:
+    """AC: If plugins/life_ops/docs/dig-deeper.md exists, a Section 3 row referencing
+    the perf-coach skill and GET /api/coach/weekly-message is present."""
+
+    def test_dig_deeper_has_coach_row(self):
+        dig_deeper = Path(__file__).parent.parent / "plugins" / "life_ops" / "docs" / "dig-deeper.md"
+        if not dig_deeper.exists():
+            pytest.skip("dig-deeper.md not found on this branch")
+        content = dig_deeper.read_text(encoding="utf-8")
+        assert "coach directive" in content, "dig-deeper.md missing 'coach directive' in Section 3"
+        assert "GET /api/coach/weekly-message" in content, (
+            "dig-deeper.md missing GET /api/coach/weekly-message in Section 3"
+        )
