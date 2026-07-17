@@ -563,3 +563,366 @@ class TestMethodNames:
         """AC9: _nudge_task is initialized to None on construction."""
         adapter = _make_adapter()
         assert adapter._nudge_task is None
+
+
+# ===========================================================================
+# Issue #50 — Idle-day nudge scheduler
+# ===========================================================================
+
+
+def _make_todo_store_with_open(open_todos=None, closed_today=0):
+    m = MagicMock()
+    m.get_open_todos.return_value = open_todos if open_todos is not None else []
+    m.count_todos_closed_today.return_value = closed_today
+    return m
+
+
+def _make_adapter_for_idle(client=None, away_mode=None, todo_store=None, channel_id="12345"):
+    from services.lifeops_discord_adapter import LifeOpsDiscordAdapter
+    return LifeOpsDiscordAdapter(
+        client=client or _make_client(),
+        away_mode=away_mode or _make_away_mode(),
+        todo_store=todo_store or _make_todo_store_with_open(),
+        channel_id=channel_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Idle-day config — both DISCORD_NUDGE_IDLE_HOUR and DISCORD_NUDGE_IDLE_MINUTE required
+# ---------------------------------------------------------------------------
+
+
+class TestIdleDayNudgeConfig:
+    def test_disabled_when_hour_unset(self, monkeypatch):
+        """AC: DISCORD_NUDGE_IDLE_HOUR unset → scheduler disabled."""
+        monkeypatch.delenv("DISCORD_NUDGE_IDLE_HOUR", raising=False)
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_MINUTE", "0")
+        from services.lifeops_discord_adapter import _read_idle_day_nudge_config
+        cfg = _read_idle_day_nudge_config()
+        assert cfg["enabled"] is False
+
+    def test_disabled_when_minute_unset(self, monkeypatch):
+        """AC: DISCORD_NUDGE_IDLE_MINUTE unset → scheduler disabled."""
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_HOUR", "21")
+        monkeypatch.delenv("DISCORD_NUDGE_IDLE_MINUTE", raising=False)
+        from services.lifeops_discord_adapter import _read_idle_day_nudge_config
+        cfg = _read_idle_day_nudge_config()
+        assert cfg["enabled"] is False
+
+    def test_disabled_when_both_unset(self, monkeypatch):
+        """AC: Both unset → scheduler disabled."""
+        monkeypatch.delenv("DISCORD_NUDGE_IDLE_HOUR", raising=False)
+        monkeypatch.delenv("DISCORD_NUDGE_IDLE_MINUTE", raising=False)
+        from services.lifeops_discord_adapter import _read_idle_day_nudge_config
+        cfg = _read_idle_day_nudge_config()
+        assert cfg["enabled"] is False
+
+    def test_enabled_when_both_set(self, monkeypatch):
+        """AC: Both set with valid integers → scheduler enabled."""
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_HOUR", "21")
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_MINUTE", "30")
+        from services.lifeops_discord_adapter import _read_idle_day_nudge_config
+        cfg = _read_idle_day_nudge_config()
+        assert cfg["enabled"] is True
+        assert cfg["hour"] == 21
+        assert cfg["minute"] == 30
+
+    def test_disabled_when_hour_non_integer(self, monkeypatch):
+        """AC: Non-integer DISCORD_NUDGE_IDLE_HOUR → disabled."""
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_HOUR", "evening")
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_MINUTE", "0")
+        from services.lifeops_discord_adapter import _read_idle_day_nudge_config
+        cfg = _read_idle_day_nudge_config()
+        assert cfg["enabled"] is False
+
+    def test_disabled_when_minute_non_integer(self, monkeypatch):
+        """AC: Non-integer DISCORD_NUDGE_IDLE_MINUTE → disabled."""
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_HOUR", "21")
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_MINUTE", "half")
+        from services.lifeops_discord_adapter import _read_idle_day_nudge_config
+        cfg = _read_idle_day_nudge_config()
+        assert cfg["enabled"] is False
+
+
+# ---------------------------------------------------------------------------
+# Idle-day scheduler lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestIdleDaySchedulerLifecycle:
+    def test_scheduler_not_started_when_hour_missing(self, monkeypatch):
+        """AC: If DISCORD_NUDGE_IDLE_HOUR unset, _start_idle_day_nudge_scheduler is a no-op."""
+        monkeypatch.delenv("DISCORD_NUDGE_IDLE_HOUR", raising=False)
+        monkeypatch.delenv("DISCORD_NUDGE_IDLE_MINUTE", raising=False)
+        adapter = _make_adapter_for_idle()
+        adapter._start_idle_day_nudge_scheduler()
+        assert adapter._idle_task is None
+
+    def test_idle_task_initialized_to_none(self):
+        """AC: _idle_task is None on construction."""
+        adapter = _make_adapter_for_idle()
+        assert adapter._idle_task is None
+
+    @pytest.mark.asyncio
+    async def test_scheduler_creates_task_when_both_env_vars_set(self, monkeypatch):
+        """AC: _start_idle_day_nudge_scheduler creates a task when both vars are set."""
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_HOUR", "21")
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_MINUTE", "0")
+        adapter = _make_adapter_for_idle()
+
+        async def fake_loop(cfg):
+            await asyncio.sleep(9999)
+
+        with patch.object(adapter, "_idle_day_nudge_scheduler_loop", fake_loop):
+            adapter._start_idle_day_nudge_scheduler()
+            assert adapter._idle_task is not None
+            adapter._idle_task.cancel()
+            try:
+                await adapter._idle_task
+            except asyncio.CancelledError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_start_is_idempotent(self, monkeypatch):
+        """AC: Calling _start_idle_day_nudge_scheduler twice creates only one task."""
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_HOUR", "21")
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_MINUTE", "0")
+        adapter = _make_adapter_for_idle()
+
+        async def fake_loop(cfg):
+            await asyncio.sleep(9999)
+
+        with patch.object(adapter, "_idle_day_nudge_scheduler_loop", fake_loop):
+            adapter._start_idle_day_nudge_scheduler()
+            first_task = adapter._idle_task
+            adapter._start_idle_day_nudge_scheduler()
+            assert adapter._idle_task is first_task
+            first_task.cancel()
+            try:
+                await first_task
+            except asyncio.CancelledError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_cancel_clears_idle_task(self, monkeypatch):
+        """AC: _cancel_idle_day_nudge_task() cancels and clears _idle_task."""
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_HOUR", "21")
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_MINUTE", "0")
+        adapter = _make_adapter_for_idle()
+
+        async def fake_loop(cfg):
+            await asyncio.sleep(9999)
+
+        with patch.object(adapter, "_idle_day_nudge_scheduler_loop", fake_loop):
+            adapter._start_idle_day_nudge_scheduler()
+            assert adapter._idle_task is not None
+            await adapter._cancel_idle_day_nudge_task()
+            assert adapter._idle_task is None
+
+    @pytest.mark.asyncio
+    async def test_loop_sleeps_positive_delay(self, monkeypatch):
+        """AC: The loop sleeps a positive delay ≤ 86400s before firing."""
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_HOUR", "21")
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_MINUTE", "30")
+
+        sleep_calls = []
+
+        async def fake_sleep(delay):
+            sleep_calls.append(delay)
+            raise asyncio.CancelledError()
+
+        adapter = _make_adapter_for_idle()
+        cfg = {"hour": 21, "minute": 30}
+
+        with patch("asyncio.sleep", side_effect=fake_sleep):
+            try:
+                await adapter._idle_day_nudge_scheduler_loop(cfg)
+            except asyncio.CancelledError:
+                pass
+
+        assert len(sleep_calls) == 1
+        assert 0 < sleep_calls[0] <= 86400
+
+
+# ---------------------------------------------------------------------------
+# _fire_idle_day_nudge skip conditions
+# ---------------------------------------------------------------------------
+
+
+class TestIdleDayNudgeFireSkipConditions:
+    @pytest.mark.asyncio
+    async def test_skip_when_away(self):
+        """AC: away_mode active → no post."""
+        channel = _make_channel()
+        client = _make_client(channel=channel)
+        away_mode = _make_away_mode(is_away=True)
+        store = _make_todo_store_with_open(open_todos=[_make_todo()], closed_today=0)
+        adapter = _make_adapter_for_idle(client=client, away_mode=away_mode, todo_store=store)
+        await adapter._fire_idle_day_nudge({})
+        channel.send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skip_when_away_does_not_call_count_closed(self):
+        """AC: count_todos_closed_today() is not called when away."""
+        store = _make_todo_store_with_open(open_todos=[_make_todo()], closed_today=0)
+        away_mode = _make_away_mode(is_away=True)
+        adapter = _make_adapter_for_idle(away_mode=away_mode, todo_store=store)
+        await adapter._fire_idle_day_nudge({})
+        store.count_todos_closed_today.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skip_when_todos_closed_today(self):
+        """AC: count_todos_closed_today() > 0 → no post."""
+        channel = _make_channel()
+        client = _make_client(channel=channel)
+        store = _make_todo_store_with_open(open_todos=[_make_todo()], closed_today=1)
+        adapter = _make_adapter_for_idle(client=client, todo_store=store)
+        await adapter._fire_idle_day_nudge({})
+        channel.send.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skip_when_open_todos_empty(self):
+        """AC: get_open_todos() returns [] → no post."""
+        channel = _make_channel()
+        client = _make_client(channel=channel)
+        store = _make_todo_store_with_open(open_todos=[], closed_today=0)
+        adapter = _make_adapter_for_idle(client=client, todo_store=store)
+        await adapter._fire_idle_day_nudge({})
+        channel.send.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _fire_idle_day_nudge success path
+# ---------------------------------------------------------------------------
+
+
+class TestIdleDayNudgeFireSuccess:
+    @pytest.mark.asyncio
+    async def test_posts_correct_message(self):
+        """AC: Posts exactly "Haven't touched your list today — want to review it?"."""
+        channel = _make_channel()
+        client = _make_client(channel=channel)
+        store = _make_todo_store_with_open(open_todos=[_make_todo()], closed_today=0)
+        adapter = _make_adapter_for_idle(client=client, todo_store=store)
+        await adapter._fire_idle_day_nudge({})
+        channel.send.assert_awaited_once()
+        args, kwargs = channel.send.call_args
+        content = args[0] if args else kwargs.get("content", "")
+        assert content == "Haven't touched your list today — want to review it?"
+
+    @pytest.mark.asyncio
+    async def test_posts_with_todo_closure_view(self):
+        """AC: Message is sent with a TodoClosureView as 'view'."""
+        from services.lifeops_discord_adapter import TodoClosureView
+        channel = _make_channel()
+        client = _make_client(channel=channel)
+        store = _make_todo_store_with_open(open_todos=[_make_todo()], closed_today=0)
+        adapter = _make_adapter_for_idle(client=client, todo_store=store)
+        await adapter._fire_idle_day_nudge({})
+        _, kwargs = channel.send.call_args
+        assert isinstance(kwargs.get("view"), TodoClosureView)
+
+    @pytest.mark.asyncio
+    async def test_todo_closure_view_receives_open_todos(self):
+        """AC: TodoClosureView is populated with the current open todos."""
+        from services.lifeops_discord_adapter import TodoClosureView
+        channel = _make_channel()
+        client = _make_client(channel=channel)
+        open_todos = [_make_todo("o1"), _make_todo("o2")]
+        store = _make_todo_store_with_open(open_todos=open_todos, closed_today=0)
+        adapter = _make_adapter_for_idle(client=client, todo_store=store)
+        await adapter._fire_idle_day_nudge({})
+        _, kwargs = channel.send.call_args
+        view = kwargs.get("view")
+        assert isinstance(view, TodoClosureView)
+        assert view.todos == open_todos
+
+    @pytest.mark.asyncio
+    async def test_calls_get_open_todos_not_get_stale_todos(self):
+        """AC: Uses get_open_todos() (not get_stale_todos()) for the view payload."""
+        store = _make_todo_store_with_open(open_todos=[_make_todo()], closed_today=0)
+        adapter = _make_adapter_for_idle(todo_store=store)
+        await adapter._fire_idle_day_nudge({})
+        store.get_open_todos.assert_called_once()
+        store.get_stale_todos.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Method names for idle-day scheduler
+# ---------------------------------------------------------------------------
+
+
+class TestIdleDaySchedulerMethodNames:
+    def test_has_start_idle_method(self):
+        """AC: LifeOpsDiscordAdapter has _start_idle_day_nudge_scheduler."""
+        adapter = _make_adapter_for_idle()
+        assert callable(getattr(adapter, "_start_idle_day_nudge_scheduler", None))
+
+    def test_has_loop_idle_method(self):
+        """AC: LifeOpsDiscordAdapter has _idle_day_nudge_scheduler_loop."""
+        adapter = _make_adapter_for_idle()
+        assert callable(getattr(adapter, "_idle_day_nudge_scheduler_loop", None))
+
+    def test_has_fire_idle_method(self):
+        """AC: LifeOpsDiscordAdapter has _fire_idle_day_nudge."""
+        adapter = _make_adapter_for_idle()
+        assert callable(getattr(adapter, "_fire_idle_day_nudge", None))
+
+    def test_has_cancel_idle_method(self):
+        """AC: LifeOpsDiscordAdapter has _cancel_idle_day_nudge_task."""
+        adapter = _make_adapter_for_idle()
+        assert callable(getattr(adapter, "_cancel_idle_day_nudge_task", None))
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle wiring: _run_post_connect_initialization / cancel_background_tasks
+# ---------------------------------------------------------------------------
+
+
+class TestLifecycleWiring:
+    def test_has_run_post_connect_initialization(self):
+        """AC: LifeOpsDiscordAdapter has _run_post_connect_initialization."""
+        adapter = _make_adapter_for_idle()
+        assert callable(getattr(adapter, "_run_post_connect_initialization", None))
+
+    def test_has_cancel_background_tasks(self):
+        """AC: LifeOpsDiscordAdapter has cancel_background_tasks."""
+        adapter = _make_adapter_for_idle()
+        assert callable(getattr(adapter, "cancel_background_tasks", None))
+
+    def test_run_post_connect_starts_idle_scheduler(self, monkeypatch):
+        """AC: _run_post_connect_initialization calls _start_idle_day_nudge_scheduler."""
+        monkeypatch.delenv("DISCORD_NUDGE_IDLE_HOUR", raising=False)
+        adapter = _make_adapter_for_idle()
+        called = []
+        original = adapter._start_idle_day_nudge_scheduler
+        adapter._start_idle_day_nudge_scheduler = lambda: called.append("idle")
+        adapter._start_stale_todo_nudge_scheduler = lambda: called.append("stale")
+        adapter._run_post_connect_initialization()
+        assert "idle" in called
+
+    def test_run_post_connect_starts_stale_scheduler(self, monkeypatch):
+        """AC: _run_post_connect_initialization also calls _start_stale_todo_nudge_scheduler."""
+        monkeypatch.delenv("DISCORD_NUDGE_STALE_HOUR", raising=False)
+        adapter = _make_adapter_for_idle()
+        called = []
+        adapter._start_idle_day_nudge_scheduler = lambda: called.append("idle")
+        adapter._start_stale_todo_nudge_scheduler = lambda: called.append("stale")
+        adapter._run_post_connect_initialization()
+        assert "stale" in called
+
+    @pytest.mark.asyncio
+    async def test_cancel_background_tasks_cancels_idle(self, monkeypatch):
+        """AC: cancel_background_tasks cancels the idle-day task."""
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_HOUR", "21")
+        monkeypatch.setenv("DISCORD_NUDGE_IDLE_MINUTE", "0")
+        adapter = _make_adapter_for_idle()
+
+        async def fake_loop(cfg):
+            await asyncio.sleep(9999)
+
+        with patch.object(adapter, "_idle_day_nudge_scheduler_loop", fake_loop):
+            adapter._start_idle_day_nudge_scheduler()
+            assert adapter._idle_task is not None
+            await adapter.cancel_background_tasks()
+            assert adapter._idle_task is None

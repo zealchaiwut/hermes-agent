@@ -12,7 +12,7 @@ import os
 
 
 class TodoStore:
-    """In-memory todo store with staleness detection."""
+    """In-memory todo store with staleness detection and closure tracking."""
 
     def __init__(self, db_path: Optional[str] = None):
         """Initialize the todo store.
@@ -21,6 +21,7 @@ class TodoStore:
             db_path: Optional path to persist todos. If None, uses in-memory storage.
         """
         self._todos = {}  # key -> todo dict
+        self._closures = []  # list of {"key": str, "closed_at": ISO str}
         self.db_path = db_path or self._get_default_db_path()
         self._load_from_disk()
 
@@ -32,26 +33,33 @@ class TodoStore:
         return str(db_dir / "todos.json")
 
     def _load_from_disk(self) -> None:
-        """Load todos from disk if the database file exists."""
+        """Load todos and closures from disk if the database file exists."""
         if Path(self.db_path).exists():
             try:
                 with open(self.db_path, "r") as f:
                     data = json.load(f)
-                    # Convert date strings back to date objects
-                    for key, todo in data.items():
-                        if "last_seen" in todo and isinstance(todo["last_seen"], str):
-                            todo["last_seen"] = datetime.fromisoformat(todo["last_seen"]).date()
-                        if "first_seen" in todo and isinstance(todo["first_seen"], str):
-                            todo["first_seen"] = datetime.fromisoformat(todo["first_seen"]).date()
-                    self._todos = data
+                # New format: {"todos": {...}, "closures": [...]}
+                # Old format: flat dict of todos (backward compat)
+                if isinstance(data, dict) and "todos" in data and "closures" in data:
+                    todos_data = data["todos"]
+                    self._closures = data.get("closures", [])
+                else:
+                    todos_data = data
+                    self._closures = []
+                for key, todo in todos_data.items():
+                    if "last_seen" in todo and isinstance(todo["last_seen"], str):
+                        todo["last_seen"] = datetime.fromisoformat(todo["last_seen"]).date()
+                    if "first_seen" in todo and isinstance(todo["first_seen"], str):
+                        todo["first_seen"] = datetime.fromisoformat(todo["first_seen"]).date()
+                self._todos = todos_data
             except (json.JSONDecodeError, IOError):
                 self._todos = {}
+                self._closures = []
 
     def _save_to_disk(self) -> None:
-        """Save todos to disk."""
+        """Save todos and closures to disk."""
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        # Convert date objects to ISO format strings for JSON
-        serializable = {}
+        serializable_todos = {}
         for key, todo in self._todos.items():
             todo_copy = dict(todo)
             if isinstance(todo_copy.get("last_seen"), datetime):
@@ -62,9 +70,9 @@ class TodoStore:
                 todo_copy["first_seen"] = todo_copy["first_seen"].isoformat()
             else:
                 todo_copy["first_seen"] = todo_copy["first_seen"].isoformat() if hasattr(todo_copy.get("first_seen"), "isoformat") else str(todo_copy["first_seen"])
-            serializable[key] = todo_copy
+            serializable_todos[key] = todo_copy
         with open(self.db_path, "w") as f:
-            json.dump(serializable, f, indent=2)
+            json.dump({"todos": serializable_todos, "closures": self._closures}, f, indent=2)
 
     def add_todo(
         self,
@@ -141,3 +149,32 @@ class TodoStore:
         stale.sort(key=lambda t: t["last_seen"])
 
         return stale
+
+    def close_todo(self, key: str) -> None:
+        """Mark a todo as closed and record the closure timestamp.
+
+        Args:
+            key: The key of the todo to close. No-op if key is not found.
+        """
+        if key not in self._todos:
+            return
+        del self._todos[key]
+        self._closures.append({"key": key, "closed_at": datetime.now().isoformat()})
+        self._save_to_disk()
+
+    def count_todos_closed_today(self) -> int:
+        """Return the number of todos closed since local midnight today.
+
+        Returns:
+            Count of closure records whose closed_at timestamp falls on today's date.
+        """
+        today = datetime.now().date()
+        count = 0
+        for closure in self._closures:
+            try:
+                closed_date = datetime.fromisoformat(closure["closed_at"]).date()
+                if closed_date == today:
+                    count += 1
+            except (KeyError, ValueError):
+                pass
+        return count
