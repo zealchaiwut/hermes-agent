@@ -39,6 +39,12 @@ routes, `repo` (stripped of the `owner/` prefix) for path-param routes.
 
 ---
 
+## Morning Brief
+
+| Risk | Method | Path | Purpose |
+|---|---|---|---|
+| SAFE | GET | `/api/dev-report` | Morning brief dev report — current sprint state, todos, and agent activity (shortcut: `dev_report`) |
+
 ## System / health / diagnostics
 
 | Risk | Method | Path | Purpose |
