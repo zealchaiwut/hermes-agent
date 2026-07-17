@@ -1,7 +1,8 @@
 # Morning-Chain Deploy
 
-Automates the M5 morning workflow (journal → perf-coach brief → hermes delivery)
-via a launchd job that fires at **05:45 Asia/Bangkok (UTC+7)** = **22:45 UTC** the
+Automates the M5 morning workflow across six steps (todo export → journal →
+todo ingest → perf-coach brief → commander export → hermes delivery) via a
+launchd job that fires at **05:45 Asia/Bangkok (UTC+7)** = **22:45 UTC** the
 previous calendar day.
 
 ## Files
@@ -9,7 +10,18 @@ previous calendar day.
 | File | Purpose |
 |---|---|
 | `com.hermes.morning-chain.plist` | launchd job definition |
-| `bin/morning-chain.sh` | three-step chain script with flock + kill switch |
+| `bin/morning-chain.sh` | six-step chain script with flock + kill switch |
+
+## Steps
+
+| Step | Command | Notes |
+|------|---------|-------|
+| Step 1 | `todo_store_sync export` | Export current todo-store keys before journal reads them |
+| Step 2 | `bin/journal-morning-run.sh` | Run the morning journal |
+| Step 3 | `todo_store_sync ingest` | Ingest today's journal contract into the todo store |
+| Step 4 | `python3 .../export_brief.py` | Export perf-coach brief |
+| Step 5 | `export_hermes_report.py` | Export commander dev-report (failure is non-fatal: `\|\| true`) |
+| Step 6 | `hermes brief compose --deliver` | Deliver morning brief to Discord |
 
 ---
 
@@ -112,7 +124,7 @@ launchctl start com.hermes.morning-chain
 Or call the script directly:
 
 ```bash
-./deploy/bin/morning-chain.sh --dry-run   # prints commands, no execution
+./deploy/bin/morning-chain.sh --dry-run   # prints all 6 commands, no execution
 ./deploy/bin/morning-chain.sh             # full run (requires upstream repos)
 ```
 
