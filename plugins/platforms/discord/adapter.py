@@ -959,6 +959,11 @@ class DiscordAdapter(BasePlatformAdapter):
         self._liveness_task: Optional[asyncio.Task] = None
         self._bedtime_task: Optional[asyncio.Task] = None
         self._approvals_task: Optional[asyncio.Task] = None
+        # Life-ops nudge schedulers (todo-closure adapter + one task attr per nudge)
+        self._lifeops_adapter = None  # LifeOpsDiscordAdapter instance (todo-closure)
+        self._nudge_stale_task: Optional[asyncio.Task] = None   # stale-todo nudge
+        self._nudge_idle_task: Optional[asyncio.Task] = None    # idle-day nudge
+        self._nudge_weekly_task: Optional[asyncio.Task] = None  # weekly-reset nudge
         # True while disconnect() is intentionally closing discord.py. The
         # bot task's done callback uses this to distinguish an operator/service
         # shutdown from a runtime websocket crash.
@@ -1695,6 +1700,41 @@ class DiscordAdapter(BasePlatformAdapter):
                 pass
         self._approvals_task = None
 
+    # ------------------------------------------------------------------
+    # Life-ops nudge schedulers (todo-closure)
+    # ------------------------------------------------------------------
+
+    def _start_life_ops_nudges(self) -> None:
+        """Create and start the LifeOpsDiscordAdapter nudge schedulers.
+
+        Idempotent: re-uses an existing _lifeops_adapter instance if already set.
+        Uses DISCORD_HOME_CHANNEL as the delivery channel.
+        """
+        try:
+            from plugins.life_ops.adapter import make_lifeops_adapter
+        except ImportError:
+            logger.debug("[%s] life_ops plugin not available; skipping nudge schedulers", self.name)
+            return
+
+        if self._lifeops_adapter is None:
+            self._lifeops_adapter = make_lifeops_adapter(self._client)
+
+        self._lifeops_adapter._run_post_connect_initialization()
+
+        self._nudge_stale_task = self._lifeops_adapter._nudge_task
+        self._nudge_idle_task = self._lifeops_adapter._idle_task
+        self._nudge_weekly_task = self._lifeops_adapter._weekly_task
+
+        logger.debug("[%s] Life-ops nudge schedulers started", self.name)
+
+    async def _cancel_life_ops_nudges(self) -> None:
+        """Cancel the LifeOpsDiscordAdapter and clear nudge task references."""
+        if self._lifeops_adapter is not None:
+            await self._lifeops_adapter.cancel_background_tasks()
+        self._nudge_stale_task = None
+        self._nudge_idle_task = None
+        self._nudge_weekly_task = None
+
     async def cancel_background_tasks(self) -> None:
         """Cancel background tasks, but first flush any pending text-batch sends.
 
@@ -1734,6 +1774,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._pending_text_batches.clear()
         await self._cancel_bedtime_task()
         await self._cancel_approvals_task()
+        await self._cancel_life_ops_nudges()
         await super().cancel_background_tasks()
 
     def _text_batch_flush_deadline_seconds(self) -> float:
@@ -1997,6 +2038,7 @@ class DiscordAdapter(BasePlatformAdapter):
             return
         self._start_bedtime_scheduler()
         self._start_approvals_scheduler()
+        self._start_life_ops_nudges()
         try:
             sync_policy = self._get_discord_command_sync_policy()
             if sync_policy == "off":
