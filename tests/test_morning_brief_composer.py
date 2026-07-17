@@ -1024,3 +1024,595 @@ class TestV3PerBlockOmission:
         assert "**Week plan:**" not in section
         assert "**Form:**" in section
         assert "**Weight:**" in section
+
+
+# ---------------------------------------------------------------------------
+# Issue #42 — Structured commander contract in render_dev_report_section
+# ---------------------------------------------------------------------------
+
+_STATUS_GLYPHS = {
+    "shipped": "🚀",
+    "in_progress": "⏳",
+    "blocked": "⛔",
+    "waiting_signoff": "📋",
+    "idle": "💤",
+}
+
+
+def _project(
+    name="TestProject",
+    status="idle",
+    in_progress_info=None,
+    shipped=None,
+    fixed=None,
+    stale=None,
+    waiting=None,
+):
+    p = {"name": name, "status": status}
+    if in_progress_info is not None:
+        p["in_progress"] = in_progress_info
+    if shipped is not None:
+        p["shipped"] = shipped
+    if fixed is not None:
+        p["fixed"] = fixed
+    if stale is not None:
+        p["stale"] = stale
+    if waiting is not None:
+        p["waiting"] = waiting
+    return p
+
+
+def _cmd_projects(projects, cost="$1.00", for_date=None):
+    return {
+        "for_date": for_date or _today(),
+        "projects": projects,
+        "cost": cost,
+    }
+
+
+# AC-42-1: Glyph per status
+
+class TestCommanderProjectGlyphs:
+    """AC1: One block per project; header uses correct glyph for each status."""
+
+    def test_shipped_glyph(self):
+        data = _cmd_projects([_project(name="Alpha", status="shipped")])
+        section = render_dev_report_section(data, "")
+        assert "**Alpha** — 🚀 shipped" in section
+
+    def test_in_progress_glyph(self):
+        data = _cmd_projects([_project(name="Beta", status="in_progress")])
+        section = render_dev_report_section(data, "")
+        assert "**Beta** — ⏳ in_progress" in section
+
+    def test_blocked_glyph(self):
+        data = _cmd_projects([_project(name="Gamma", status="blocked")])
+        section = render_dev_report_section(data, "")
+        assert "**Gamma** — ⛔ blocked" in section
+
+    def test_waiting_signoff_glyph(self):
+        data = _cmd_projects([_project(name="Delta", status="waiting_signoff")])
+        section = render_dev_report_section(data, "")
+        assert "**Delta** — 📋 waiting_signoff" in section
+
+    def test_idle_glyph(self):
+        data = _cmd_projects([_project(name="Epsilon", status="idle")])
+        section = render_dev_report_section(data, "")
+        assert "**Epsilon** — 💤 idle" in section
+
+    def test_multiple_projects_each_gets_block(self):
+        data = _cmd_projects([
+            _project(name="Proj1", status="shipped"),
+            _project(name="Proj2", status="idle"),
+        ])
+        section = render_dev_report_section(data, "")
+        assert "**Proj1** — 🚀 shipped" in section
+        assert "**Proj2** — 💤 idle" in section
+
+
+# AC-42-2: in_progress suffix
+
+class TestCommanderInProgressSuffix:
+    """AC2: in_progress header appends (sprint_label, percent% — ticket) when in_progress sub-key present."""
+
+    def test_in_progress_suffix_appended(self):
+        data = _cmd_projects([_project(
+            name="Hermes",
+            status="in_progress",
+            in_progress_info={"sprint_label": "Sprint 2", "percent": 75, "ticket": "HRM-42"},
+        )])
+        section = render_dev_report_section(data, "")
+        assert "(Sprint 2, 75% — HRM-42)" in section
+
+    def test_in_progress_suffix_absent_when_no_in_progress_key(self):
+        data = _cmd_projects([_project(name="Hermes", status="in_progress")])
+        section = render_dev_report_section(data, "")
+        # header has status but no parenthetical suffix with percent
+        assert "%" not in section
+
+    def test_in_progress_suffix_not_on_other_statuses(self):
+        data = _cmd_projects([_project(
+            name="Hermes",
+            status="shipped",
+            in_progress_info={"sprint_label": "Sprint 2", "percent": 100, "ticket": "HRM-1"},
+        )])
+        section = render_dev_report_section(data, "")
+        # Only in_progress status gets the suffix
+        assert "(Sprint 2, 100% — HRM-1)" not in section
+
+
+# AC-42-3: Compact counts suffix
+
+class TestCommanderCountsSuffix:
+    """AC3: Header includes a compact counts suffix when any bucket is non-empty."""
+
+    def test_counts_suffix_present_when_shipped_non_empty(self):
+        data = _cmd_projects([_project(
+            name="Alpha",
+            status="shipped",
+            shipped=[{"label": "v1", "goal": "Ship it", "done": 1, "pr_number": 10}],
+        )])
+        section = render_dev_report_section(data, "")
+        header_line = next(l for l in section.splitlines() if "**Alpha**" in l)
+        # should contain some count indicator with '1'
+        assert "1" in header_line
+
+    def test_counts_suffix_absent_when_all_buckets_empty(self):
+        data = _cmd_projects([_project(name="Idle", status="idle")])
+        section = render_dev_report_section(data, "")
+        # idle project with no buckets: header should be just name/glyph/status, no extra parens with counts
+        header_line = next(l for l in section.splitlines() if "**Idle**" in l)
+        assert "**Idle** — 💤 idle" == header_line.strip()
+
+
+# AC-42-4: Sub-bullet order (Shipped → Fixed → Stale → Waiting)
+
+class TestCommanderBucketOrder:
+    """AC4: Sub-bullets rendered only for non-empty buckets in order Shipped→Fixed→Stale→Waiting."""
+
+    def test_bucket_order(self):
+        data = _cmd_projects([_project(
+            name="Hermes",
+            status="in_progress",
+            shipped=[{"label": "v1", "goal": "g", "done": 1, "pr_number": 1}],
+            fixed=[{"issue_number": 10, "title": "Bug fix"}],
+            stale=[{"kind": "blocked", "issue_number": 20, "age_days": 2, "type": "review", "title": "T"}],
+            waiting=[{"label": "sec", "ticket_count": 3, "estimated_hours": 5}],
+        )])
+        section = render_dev_report_section(data, "")
+        shipped_pos = section.index("Shipped:")
+        fixed_pos = section.index("Fixed:")
+        stale_pos = section.index("Stale:")
+        waiting_pos = section.index("Waiting:")
+        assert shipped_pos < fixed_pos < stale_pos < waiting_pos
+
+    def test_empty_buckets_omitted(self):
+        data = _cmd_projects([_project(
+            name="P",
+            status="in_progress",
+            fixed=[{"issue_number": 5, "title": "T"}],
+        )])
+        section = render_dev_report_section(data, "")
+        assert "Shipped:" not in section
+        assert "Fixed:" in section
+        assert "Stale:" not in section
+        assert "Waiting:" not in section
+
+
+# AC-42-5: Shipped bullet format
+
+class TestCommanderShippedBullets:
+    """AC5: Shipped bullets render as '- Shipped: {label} "{goal}" ({done} done, PR #{pr_number})'."""
+
+    def test_shipped_bullet_format(self):
+        data = _cmd_projects([_project(
+            name="P",
+            status="shipped",
+            shipped=[{"label": "feature/auth", "goal": "Add OAuth login", "done": 3, "pr_number": 101}],
+        )])
+        section = render_dev_report_section(data, "")
+        assert '- Shipped: feature/auth "Add OAuth login" (3 done, PR #101)' in section
+
+    def test_shipped_multiple_items(self):
+        data = _cmd_projects([_project(
+            name="P",
+            status="shipped",
+            shipped=[
+                {"label": "a", "goal": "A goal", "done": 1, "pr_number": 1},
+                {"label": "b", "goal": "B goal", "done": 2, "pr_number": 2},
+            ],
+        )])
+        section = render_dev_report_section(data, "")
+        assert '- Shipped: a "A goal" (1 done, PR #1)' in section
+        assert '- Shipped: b "B goal" (2 done, PR #2)' in section
+
+
+# AC-42-6: Fixed bullet format
+
+class TestCommanderFixedBullets:
+    """AC6: Fixed bullets render as '- Fixed: #{issue_number} {title}'."""
+
+    def test_fixed_bullet_format(self):
+        data = _cmd_projects([_project(
+            name="P",
+            status="shipped",
+            fixed=[{"issue_number": 55, "title": "Fix memory leak"}],
+        )])
+        section = render_dev_report_section(data, "")
+        assert "- Fixed: #55 Fix memory leak" in section
+
+    def test_fixed_multiple_items(self):
+        data = _cmd_projects([_project(
+            name="P",
+            status="shipped",
+            fixed=[
+                {"issue_number": 10, "title": "Bug A"},
+                {"issue_number": 11, "title": "Bug B"},
+            ],
+        )])
+        section = render_dev_report_section(data, "")
+        assert "- Fixed: #10 Bug A" in section
+        assert "- Fixed: #11 Bug B" in section
+
+
+# AC-42-7: Stale bullet formats (three kinds)
+
+class TestCommanderStaleBullets:
+    """AC7: Stale bullets cover blocked, waiting_signoff, and backlog kinds."""
+
+    def test_stale_blocked_format(self):
+        data = _cmd_projects([_project(
+            name="P",
+            status="in_progress",
+            stale=[{"kind": "blocked", "issue_number": 60, "age_days": 5, "type": "review", "title": "Old PR"}],
+        )])
+        section = render_dev_report_section(data, "")
+        assert "- Stale: #60 blocked 5d (review) — Old PR" in section
+
+    def test_stale_waiting_signoff_format(self):
+        data = _cmd_projects([_project(
+            name="P",
+            status="in_progress",
+            stale=[{"kind": "waiting_signoff", "label": "feature/deploy", "age_days": 3}],
+        )])
+        section = render_dev_report_section(data, "")
+        assert "- Stale: feature/deploy awaiting sign-off 3d" in section
+
+    def test_stale_backlog_format(self):
+        data = _cmd_projects([_project(
+            name="P",
+            status="in_progress",
+            stale=[{"kind": "backlog", "label": "v2.0", "age_days": 14, "ticket_count": 7}],
+        )])
+        section = render_dev_report_section(data, "")
+        assert "- Stale: v2.0 backlog untouched 14d (7 tickets)" in section
+
+    def test_all_three_stale_kinds_in_one_project(self):
+        data = _cmd_projects([_project(
+            name="P",
+            status="in_progress",
+            stale=[
+                {"kind": "blocked", "issue_number": 60, "age_days": 5, "type": "review", "title": "Old PR"},
+                {"kind": "waiting_signoff", "label": "feature/deploy", "age_days": 3},
+                {"kind": "backlog", "label": "v2.0", "age_days": 14, "ticket_count": 7},
+            ],
+        )])
+        section = render_dev_report_section(data, "")
+        assert "- Stale: #60 blocked 5d (review) — Old PR" in section
+        assert "- Stale: feature/deploy awaiting sign-off 3d" in section
+        assert "- Stale: v2.0 backlog untouched 14d (7 tickets)" in section
+
+
+# AC-42-8: Waiting bullet format
+
+class TestCommanderWaitingBullets:
+    """AC8: Waiting bullets render as '- Waiting: {label} sign-off ({ticket_count} tickets, ~{estimated_hours}h)'."""
+
+    def test_waiting_bullet_format(self):
+        data = _cmd_projects([_project(
+            name="P",
+            status="waiting_signoff",
+            waiting=[{"label": "security-review", "ticket_count": 4, "estimated_hours": 8}],
+        )])
+        section = render_dev_report_section(data, "")
+        assert "- Waiting: security-review sign-off (4 tickets, ~8h)" in section
+
+    def test_waiting_multiple_items(self):
+        data = _cmd_projects([_project(
+            name="P",
+            status="waiting_signoff",
+            waiting=[
+                {"label": "sec", "ticket_count": 2, "estimated_hours": 4},
+                {"label": "qa", "ticket_count": 1, "estimated_hours": 2},
+            ],
+        )])
+        section = render_dev_report_section(data, "")
+        assert "- Waiting: sec sign-off (2 tickets, ~4h)" in section
+        assert "- Waiting: qa sign-off (1 tickets, ~2h)" in section
+
+
+# AC-42-9: Idle collapse
+
+class TestCommanderIdleCollapse:
+    """AC9: An idle project with all empty buckets collapses to header only."""
+
+    def test_idle_project_no_sub_bullets(self):
+        data = _cmd_projects([_project(name="Idle", status="idle")])
+        section = render_dev_report_section(data, "")
+        assert "**Idle** — 💤 idle" in section
+        assert "Shipped:" not in section
+        assert "Fixed:" not in section
+        assert "Stale:" not in section
+        assert "Waiting:" not in section
+
+    def test_idle_project_with_all_empty_lists_collapses(self):
+        data = _cmd_projects([_project(
+            name="Idle",
+            status="idle",
+            shipped=[],
+            fixed=[],
+            stale=[],
+            waiting=[],
+        )])
+        section = render_dev_report_section(data, "")
+        assert "**Idle** — 💤 idle" in section
+        assert "Shipped:" not in section
+
+
+# AC-42-10: Dict-or-string tolerance
+
+class TestCommanderDictOrString:
+    """AC10: Plain string bucket items render verbatim as bullet text."""
+
+    def test_string_shipped_item_verbatim(self):
+        data = _cmd_projects([_project(
+            name="P",
+            status="shipped",
+            shipped=["plain shipped string"],
+        )])
+        section = render_dev_report_section(data, "")
+        assert "- plain shipped string" in section
+
+    def test_string_fixed_item_verbatim(self):
+        data = _cmd_projects([_project(
+            name="P",
+            status="shipped",
+            fixed=["plain fixed string"],
+        )])
+        section = render_dev_report_section(data, "")
+        assert "- plain fixed string" in section
+
+    def test_string_stale_item_verbatim(self):
+        data = _cmd_projects([_project(
+            name="P",
+            status="in_progress",
+            stale=["plain stale string"],
+        )])
+        section = render_dev_report_section(data, "")
+        assert "- plain stale string" in section
+
+    def test_string_waiting_item_verbatim(self):
+        data = _cmd_projects([_project(
+            name="P",
+            status="waiting_signoff",
+            waiting=["plain waiting string"],
+        )])
+        section = render_dev_report_section(data, "")
+        assert "- plain waiting string" in section
+
+    def test_mixed_dict_and_string_items(self):
+        data = _cmd_projects([_project(
+            name="P",
+            status="in_progress",
+            stale=[
+                {"kind": "blocked", "issue_number": 1, "age_days": 2, "type": "t", "title": "T"},
+                "plain stale string",
+            ],
+        )])
+        section = render_dev_report_section(data, "")
+        assert "- Stale: #1 blocked 2d (t) — T" in section
+        assert "- plain stale string" in section
+
+
+# AC-42-11: Missing sub-keys — no KeyError
+
+class TestCommanderMissingSubkeys:
+    """AC11: Missing project sub-keys default cleanly with no KeyError."""
+
+    def test_missing_in_progress_key_no_error(self):
+        data = _cmd_projects([_project(name="P", status="in_progress")])
+        section = render_dev_report_section(data, "")
+        assert "**P** — ⏳ in_progress" in section  # rendered without suffix
+
+    def test_missing_all_buckets_no_error(self):
+        data = _cmd_projects([{"name": "Bare", "status": "idle"}])
+        section = render_dev_report_section(data, "")
+        assert "**Bare** — 💤 idle" in section
+
+    def test_empty_stale_item_dict_no_error(self):
+        data = _cmd_projects([_project(
+            name="P",
+            status="in_progress",
+            stale=[{}],
+        )])
+        section = render_dev_report_section(data, "")  # must not raise KeyError
+        assert "**P** — ⏳ in_progress" in section
+
+
+# AC-42-12: projects key takes precedence over legacy flat keys
+
+class TestCommanderProjectsPrecedence:
+    """AC12: When both data.projects and legacy flat keys are present, projects takes precedence."""
+
+    def test_projects_wins_over_legacy_keys(self):
+        data = {
+            "for_date": _today(),
+            "projects": [_project(name="ProjectMode", status="idle")],
+            "completed": ["legacy-task"],
+            "needs_review": ["legacy-pr"],
+            "dead_letter": ["legacy-stale"],
+            "cost": "$2.00",
+        }
+        section = render_dev_report_section(data, "")
+        assert "**ProjectMode** — 💤 idle" in section
+        assert "legacy-task" not in section
+        assert "**Completed:**" not in section
+
+
+# AC-42-13: Empty/missing projects falls through to legacy path byte-for-byte
+
+class TestCommanderLegacyFallthrough:
+    """AC13: When data.projects is missing or empty list, falls through to legacy code path."""
+
+    def test_missing_projects_key_uses_legacy(self):
+        data = _commander_data(completed=["task-A"], needs_review=[], dead_letter=[], cost="$0.50")
+        section = render_dev_report_section(data, "")
+        assert "**Completed:**" in section
+        assert "task-A" in section
+
+    def test_empty_projects_list_uses_legacy(self):
+        data = {
+            "for_date": _today(),
+            "projects": [],
+            "completed": ["task-B"],
+            "needs_review": [],
+            "dead_letter": [],
+            "cost": "$0.75",
+        }
+        section = render_dev_report_section(data, "")
+        assert "**Completed:**" in section
+        assert "task-B" in section
+        assert "projects" not in section.lower() or "**" not in section.split("projects")[0][-5:]
+
+    def test_empty_projects_no_project_headers(self):
+        data = {
+            "for_date": _today(),
+            "projects": [],
+            "completed": [],
+            "needs_review": [],
+            "dead_letter": [],
+            "cost": "$0.00",
+        }
+        section = render_dev_report_section(data, "")
+        # No project-mode header pattern (bold-name — glyph)
+        assert " — 🚀" not in section
+        assert " — ⏳" not in section
+        assert " — 💤" not in section
+
+
+# AC-42-14: Cost line unchanged in both paths
+
+class TestCommanderCostLine:
+    """AC14: Trailing Cost: {cost} line rendered unchanged in both contract paths."""
+
+    def test_cost_in_projects_path(self):
+        data = _cmd_projects([_project(name="P", status="idle")], cost="$3.14")
+        section = render_dev_report_section(data, "")
+        assert "Cost: $3.14" in section
+
+    def test_cost_in_legacy_path(self):
+        data = _commander_data(cost="$9.99")
+        section = render_dev_report_section(data, "")
+        assert "Cost: $9.99" in section
+
+
+# AC-42-15: Snapshot — legacy flat contract output is byte-for-byte identical
+
+class TestCommanderLegacySnapshot:
+    """AC15: Legacy flat contract produces exactly the same output as before this change."""
+
+    _LEGACY_SNAPSHOT = (
+        "## Section 4 — Overnight Dev Report\n"
+        "\n"
+        "**Completed:**\n"
+        "- feature-X shipped\n"
+        "- bug-Y fixed\n"
+        "\n"
+        "**Needs Review:**\n"
+        "- PR #42\n"
+        "\n"
+        "**Dead Letter:** (none)\n"
+        "\n"
+        "Cost: $0.12"
+    )
+
+    def test_legacy_snapshot_byte_identical(self):
+        data = _commander_data(
+            completed=["feature-X shipped", "bug-Y fixed"],
+            needs_review=["PR #42"],
+            dead_letter=[],
+            cost="$0.12",
+        )
+        section = render_dev_report_section(data, "")
+        assert section == self._LEGACY_SNAPSHOT
+
+    def test_legacy_all_none_snapshot(self):
+        data = _commander_data(completed=[], needs_review=[], dead_letter=[], cost="$0.00")
+        section = render_dev_report_section(data, "")
+        assert "**Completed:** (none)" in section
+        assert "**Needs Review:** (none)" in section
+        assert "**Dead Letter:** (none)" in section
+        assert "Cost: $0.00" in section
+
+
+# AC-42-16: Fixture test covering all features
+
+class TestCommanderFullFixture:
+    """AC16: Fixture test covers per-project blocks, all three stale kinds, and idle collapse."""
+
+    def _full_fixture_data(self):
+        return _cmd_projects([
+            _project(
+                name="Hermes",
+                status="in_progress",
+                in_progress_info={"sprint_label": "Sprint 2", "percent": 75, "ticket": "HRM-42"},
+                shipped=[{"label": "feature/auth", "goal": "Add OAuth login", "done": 3, "pr_number": 101}],
+                fixed=[{"issue_number": 55, "title": "Fix memory leak"}],
+                stale=[
+                    {"kind": "blocked", "issue_number": 60, "age_days": 5, "type": "review", "title": "Stale PR"},
+                    {"kind": "waiting_signoff", "label": "feature/deploy", "age_days": 3},
+                    {"kind": "backlog", "label": "v2.0", "age_days": 14, "ticket_count": 7},
+                ],
+                waiting=[{"label": "security-review", "ticket_count": 4, "estimated_hours": 8}],
+            ),
+            _project(name="IdleProj", status="idle"),
+        ], cost="$1.50")
+
+    def test_full_fixture_in_progress_header(self):
+        section = render_dev_report_section(self._full_fixture_data(), "")
+        assert "**Hermes** — ⏳ in_progress" in section
+        assert "(Sprint 2, 75% — HRM-42)" in section
+
+    def test_full_fixture_shipped_bullet(self):
+        section = render_dev_report_section(self._full_fixture_data(), "")
+        assert '- Shipped: feature/auth "Add OAuth login" (3 done, PR #101)' in section
+
+    def test_full_fixture_fixed_bullet(self):
+        section = render_dev_report_section(self._full_fixture_data(), "")
+        assert "- Fixed: #55 Fix memory leak" in section
+
+    def test_full_fixture_all_stale_kinds(self):
+        section = render_dev_report_section(self._full_fixture_data(), "")
+        assert "- Stale: #60 blocked 5d (review) — Stale PR" in section
+        assert "- Stale: feature/deploy awaiting sign-off 3d" in section
+        assert "- Stale: v2.0 backlog untouched 14d (7 tickets)" in section
+
+    def test_full_fixture_waiting_bullet(self):
+        section = render_dev_report_section(self._full_fixture_data(), "")
+        assert "- Waiting: security-review sign-off (4 tickets, ~8h)" in section
+
+    def test_full_fixture_idle_collapse(self):
+        section = render_dev_report_section(self._full_fixture_data(), "")
+        assert "**IdleProj** — 💤 idle" in section
+        # idle project should not introduce Shipped:/Fixed:/Stale:/Waiting: for itself
+        # (we already test via the general assertions above that these labels do appear
+        # once for Hermes — we just verify IdleProj does not duplicate them by checking
+        # count of occurrences is exactly 1 for each label)
+        assert section.count("Shipped:") == 1
+        assert section.count("Fixed:") == 1
+        assert section.count("Stale:") == 3  # three stale items
+        assert section.count("Waiting:") == 1
+
+    def test_full_fixture_cost_line(self):
+        section = render_dev_report_section(self._full_fixture_data(), "")
+        assert "Cost: $1.50" in section

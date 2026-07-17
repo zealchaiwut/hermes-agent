@@ -302,10 +302,114 @@ def render_training_section(data: dict | None, reason: str) -> str:
     return "\n".join(lines)
 
 
+_PROJECT_GLYPHS: dict[str, str] = {
+    "shipped": "🚀",
+    "in_progress": "⏳",
+    "blocked": "⛔",
+    "waiting_signoff": "📋",
+    "idle": "💤",
+}
+
+
+def _render_project_block(project: dict) -> list[str]:
+    lines: list[str] = []
+    name = project.get("name", "")
+    status = project.get("status", "")
+    glyph = _PROJECT_GLYPHS.get(status, "❓")
+
+    header = f"**{name}** — {glyph} {status}"
+
+    if status == "in_progress" and "in_progress" in project:
+        ip = project["in_progress"]
+        sprint_label = ip.get("sprint_label", "")
+        percent = ip.get("percent", "")
+        ticket = ip.get("ticket", "")
+        header += f" ({sprint_label}, {percent}% — {ticket})"
+
+    shipped = project.get("shipped") or []
+    fixed = project.get("fixed") or []
+    stale = project.get("stale") or []
+    waiting = project.get("waiting") or []
+
+    counts_parts: list[str] = []
+    if shipped:
+        counts_parts.append(f"{len(shipped)} shipped")
+    if fixed:
+        counts_parts.append(f"{len(fixed)} fixed")
+    if stale:
+        counts_parts.append(f"{len(stale)} stale")
+    if waiting:
+        counts_parts.append(f"{len(waiting)} waiting")
+    if counts_parts:
+        header += f" ({', '.join(counts_parts)})"
+
+    lines.append(header)
+
+    for item in shipped:
+        if not isinstance(item, dict):
+            lines.append(f"- {item}")
+        else:
+            label = item.get("label", "")
+            goal = item.get("goal", "")
+            done = item.get("done", "")
+            pr_number = item.get("pr_number", "")
+            lines.append(f'- Shipped: {label} "{goal}" ({done} done, PR #{pr_number})')
+
+    for item in fixed:
+        if not isinstance(item, dict):
+            lines.append(f"- {item}")
+        else:
+            issue_number = item.get("issue_number", "")
+            title = item.get("title", "")
+            lines.append(f"- Fixed: #{issue_number} {title}")
+
+    for item in stale:
+        if not isinstance(item, dict):
+            lines.append(f"- {item}")
+        else:
+            kind = item.get("kind", "")
+            if kind == "blocked":
+                issue_number = item.get("issue_number", "")
+                age_days = item.get("age_days", "")
+                type_ = item.get("type", "")
+                title = item.get("title", "")
+                lines.append(f"- Stale: #{issue_number} blocked {age_days}d ({type_}) — {title}")
+            elif kind == "waiting_signoff":
+                label = item.get("label", "")
+                age_days = item.get("age_days", "")
+                lines.append(f"- Stale: {label} awaiting sign-off {age_days}d")
+            elif kind == "backlog":
+                label = item.get("label", "")
+                age_days = item.get("age_days", "")
+                ticket_count = item.get("ticket_count", "")
+                lines.append(f"- Stale: {label} backlog untouched {age_days}d ({ticket_count} tickets)")
+            else:
+                lines.append(f"- {item}")
+
+    for item in waiting:
+        if not isinstance(item, dict):
+            lines.append(f"- {item}")
+        else:
+            label = item.get("label", "")
+            ticket_count = item.get("ticket_count", "")
+            estimated_hours = item.get("estimated_hours", "")
+            lines.append(f"- Waiting: {label} sign-off ({ticket_count} tickets, ~{estimated_hours}h)")
+
+    return lines
+
+
 def render_dev_report_section(data: dict | None, reason: str) -> str:
     lines = ["## Section 4 — Overnight Dev Report\n"]
     if data is None:
         lines.append(_unavailable_block(reason))
+        return "\n".join(lines)
+
+    projects = data.get("projects")
+    if projects:
+        for project in projects:
+            lines.extend(_render_project_block(project))
+        cost = data.get("cost", "unknown")
+        lines.append(f"\nCost: {cost}")
         return "\n".join(lines)
 
     completed = data.get("completed") or []
