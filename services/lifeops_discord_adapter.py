@@ -24,6 +24,32 @@ except ImportError:
     discord = None  # type: ignore[assignment]
 
 
+def _read_idle_day_nudge_config() -> dict:
+    """Read idle-day nudge scheduler config from environment variables.
+
+    Both DISCORD_NUDGE_IDLE_HOUR and DISCORD_NUDGE_IDLE_MINUTE must be set
+    and parseable as integers; if either is missing the scheduler is disabled.
+
+    Keys:
+        enabled — True only when both env vars are set and parseable
+        hour    — int, local hour (0-23)
+        minute  — int, local minute (0-59)
+    """
+    raw_hour = os.getenv("DISCORD_NUDGE_IDLE_HOUR", "").strip()
+    raw_minute = os.getenv("DISCORD_NUDGE_IDLE_MINUTE", "").strip()
+    if not raw_hour or not raw_minute:
+        return {"enabled": False, "hour": 0, "minute": 0}
+    try:
+        hour = int(raw_hour)
+    except ValueError:
+        return {"enabled": False, "hour": 0, "minute": 0}
+    try:
+        minute = int(raw_minute)
+    except ValueError:
+        return {"enabled": False, "hour": 0, "minute": 0}
+    return {"enabled": True, "hour": hour, "minute": minute}
+
+
 def _read_stale_todo_nudge_config() -> dict:
     """Read stale-todo nudge scheduler config from environment variables.
 
@@ -77,6 +103,7 @@ class LifeOpsDiscordAdapter:
         self._channel_id = channel_id
         self.name = name
         self._nudge_task: Optional[asyncio.Task] = None
+        self._idle_task: Optional[asyncio.Task] = None
 
     # ------------------------------------------------------------------
     # Scheduler lifecycle
@@ -181,6 +208,126 @@ class LifeOpsDiscordAdapter:
             except asyncio.CancelledError:
                 pass
         self._nudge_task = None
+
+    # ------------------------------------------------------------------
+    # Idle-day nudge scheduler
+    # ------------------------------------------------------------------
+
+    def _start_idle_day_nudge_scheduler(self) -> None:
+        """Start the idle-day nudge scheduler if both DISCORD_NUDGE_IDLE_HOUR
+        and DISCORD_NUDGE_IDLE_MINUTE are set.
+
+        Idempotent: a second call while the task is live is a no-op.
+        """
+        cfg = _read_idle_day_nudge_config()
+        if not cfg["enabled"]:
+            return
+        if self._idle_task and not self._idle_task.done():
+            return
+        self._idle_task = asyncio.create_task(
+            self._idle_day_nudge_scheduler_loop(cfg)
+        )
+        logger.info(
+            "[%s] Idle-day nudge scheduler started (fire at %02d:%02d local)",
+            self.name, cfg["hour"], cfg["minute"],
+        )
+
+    async def _idle_day_nudge_scheduler_loop(self, cfg: dict) -> None:
+        """Loop indefinitely, firing the idle-day nudge once per 24 h."""
+        import datetime
+
+        while True:
+            now = datetime.datetime.now()
+            target = now.replace(
+                hour=cfg["hour"], minute=cfg["minute"], second=0, microsecond=0
+            )
+            if target <= now:
+                target += datetime.timedelta(days=1)
+            delay = (target - now).total_seconds()
+            logger.debug(
+                "[%s] Idle-day nudge: sleeping %.0fs until %s local",
+                self.name, delay, target.isoformat(),
+            )
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+
+            try:
+                await self._fire_idle_day_nudge(cfg)
+            except Exception as exc:
+                logger.error(
+                    "[%s] Idle-day nudge: unexpected error: %s", self.name, exc
+                )
+
+    async def _fire_idle_day_nudge(self, cfg: dict) -> None:
+        """Post the idle-day nudge if the user hasn't closed any todos today
+        and still has open items.
+
+        Skips silently when:
+        - away_mode.is_away() is True
+        - count_todos_closed_today() > 0
+        - get_open_todos() returns an empty list
+        - the channel is not reachable
+        """
+        if self._away_mode.is_away():
+            logger.debug("[%s] Idle-day nudge: away mode active; skipping", self.name)
+            return
+
+        if self._todo_store.count_todos_closed_today() > 0:
+            logger.info("[%s] Idle-day nudge: todos already closed today; skipping", self.name)
+            return
+
+        open_todos = self._todo_store.get_open_todos()
+        if not open_todos:
+            logger.info("[%s] Idle-day nudge: no open todos; skipping", self.name)
+            return
+
+        if not self._channel_id or not self._client:
+            logger.warning(
+                "[%s] Idle-day nudge: channel not configured; skipping", self.name
+            )
+            return
+
+        ch = self._client.get_channel(int(self._channel_id))
+        if ch is None:
+            logger.warning(
+                "[%s] Idle-day nudge: channel %s not found; skipping",
+                self.name, self._channel_id,
+            )
+            return
+
+        content = "Haven't touched your list today — want to review it?"
+        view = TodoClosureView(todos=open_todos)
+        await ch.send(content, view=view)
+        logger.info(
+            "[%s] Idle-day nudge posted (%d open todo(s), channel=%s)",
+            self.name, len(open_todos), self._channel_id,
+        )
+
+    async def _cancel_idle_day_nudge_task(self) -> None:
+        """Cancel and await the idle-day nudge scheduler task, if running."""
+        if self._idle_task and not self._idle_task.done():
+            self._idle_task.cancel()
+            try:
+                await self._idle_task
+            except asyncio.CancelledError:
+                pass
+        self._idle_task = None
+
+    # ------------------------------------------------------------------
+    # Lifecycle aggregates
+    # ------------------------------------------------------------------
+
+    def _run_post_connect_initialization(self) -> None:
+        """Start all background schedulers after the bot connects."""
+        self._start_stale_todo_nudge_scheduler()
+        self._start_idle_day_nudge_scheduler()
+
+    async def cancel_background_tasks(self) -> None:
+        """Cancel all background scheduler tasks."""
+        await self._cancel_stale_todo_nudge_task()
+        await self._cancel_idle_day_nudge_task()
 
 
 # ---------------------------------------------------------------------------

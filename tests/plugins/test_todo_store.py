@@ -1,4 +1,4 @@
-"""Tests for get_stale_todos() in todo_store.py.
+"""Tests for get_stale_todos(), close_todo(), and count_todos_closed_today() in todo_store.py.
 
 Covers the todo_store module at ``plugins/life_ops/todo_store.py``:
 
@@ -8,6 +8,8 @@ Covers the todo_store module at ``plugins/life_ops/todo_store.py``:
   * Recurring todos are eligible for staleness.
   * Calling ``get_stale_todos()`` does not mutate the store or affect
     ``get_open_todos()`` output.
+  * ``close_todo(key)`` removes a todo from the open list and records a closure.
+  * ``count_todos_closed_today()`` returns the count of todos closed since local midnight.
 """
 
 import importlib
@@ -290,3 +292,97 @@ def test_get_stale_todos_boundary_condition_exactly_at_threshold(todo_store):
 
     # This todo should NOT be included (not strictly older)
     assert len(result) == 0
+
+
+# ===========================================================================
+# Issue #50 — close_todo() and count_todos_closed_today()
+# ===========================================================================
+
+
+class TestCloseTodo:
+    """AC: close_todo() removes a todo from the open list and records a closure."""
+
+    def test_close_todo_removes_from_open_todos(self, todo_store, tmp_path, monkeypatch):
+        """AC: closed todo no longer appears in get_open_todos()."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        store = todo_store.TodoStore()
+        store.add_todo(key="t1", text="Task one", priority=1, recurring=False)
+        store.close_todo("t1")
+        open_todos = store.get_open_todos()
+        assert not any(t["key"] == "t1" for t in open_todos)
+
+    def test_close_todo_does_not_affect_other_todos(self, todo_store, tmp_path, monkeypatch):
+        """AC: only the specified todo is removed; others remain open."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        store = todo_store.TodoStore()
+        store.add_todo(key="t1", text="Task one", priority=1, recurring=False)
+        store.add_todo(key="t2", text="Task two", priority=2, recurring=False)
+        store.close_todo("t1")
+        open_todos = store.get_open_todos()
+        assert any(t["key"] == "t2" for t in open_todos)
+        assert len(open_todos) == 1
+
+    def test_close_todo_nonexistent_key_does_not_raise(self, todo_store, tmp_path, monkeypatch):
+        """AC: close_todo() on an unknown key is a no-op, not an error."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        store = todo_store.TodoStore()
+        store.close_todo("does-not-exist")
+
+
+class TestCountTodosClosedToday:
+    """AC: count_todos_closed_today() returns the count of todos closed since local midnight."""
+
+    def test_returns_zero_on_fresh_store(self, todo_store, tmp_path, monkeypatch):
+        """AC: Fresh store with no closures returns 0."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        store = todo_store.TodoStore()
+        assert store.count_todos_closed_today() == 0
+
+    def test_returns_one_after_single_close_today(self, todo_store, tmp_path, monkeypatch):
+        """AC: Closing one todo today returns 1."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        store = todo_store.TodoStore()
+        store.add_todo(key="t1", text="Task", priority=1, recurring=False)
+        store.close_todo("t1")
+        assert store.count_todos_closed_today() == 1
+
+    def test_returns_correct_count_after_multiple_closures(self, todo_store, tmp_path, monkeypatch):
+        """AC: Returns the correct positive integer after multiple closures today."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        store = todo_store.TodoStore()
+        store.add_todo(key="t1", text="Task 1", priority=1, recurring=False)
+        store.add_todo(key="t2", text="Task 2", priority=1, recurring=False)
+        store.close_todo("t1")
+        store.close_todo("t2")
+        assert store.count_todos_closed_today() == 2
+
+    def test_excludes_closures_from_yesterday(self, todo_store, tmp_path, monkeypatch):
+        """AC: Closures recorded before local midnight today are not counted."""
+        import datetime
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        store = todo_store.TodoStore()
+        yesterday = (datetime.datetime.now() - datetime.timedelta(days=1)).isoformat()
+        store._closures.append({"key": "old", "closed_at": yesterday})
+        store._save_to_disk()
+        assert store.count_todos_closed_today() == 0
+
+    def test_counts_today_but_not_yesterday(self, todo_store, tmp_path, monkeypatch):
+        """AC: Two closures from yesterday + one today → returns 1."""
+        import datetime
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        store = todo_store.TodoStore()
+        yesterday = (datetime.datetime.now() - datetime.timedelta(days=1)).isoformat()
+        store._closures.append({"key": "old1", "closed_at": yesterday})
+        store._closures.append({"key": "old2", "closed_at": yesterday})
+        store.add_todo(key="today", text="Today", priority=1, recurring=False)
+        store.close_todo("today")
+        assert store.count_todos_closed_today() == 1
+
+    def test_persists_across_reload(self, todo_store, tmp_path, monkeypatch):
+        """AC: Closure count survives a store reload from disk."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        store = todo_store.TodoStore()
+        store.add_todo(key="t1", text="Task", priority=1, recurring=False)
+        store.close_todo("t1")
+        store2 = todo_store.TodoStore()
+        assert store2.count_todos_closed_today() == 1
