@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
-# morning-chain.sh — M5 morning workflow: journal → perf-coach brief → hermes deliver
+# morning-chain.sh — M5 morning workflow:
+#   todo export → journal → todo ingest → perf-coach brief → commander export → hermes deliver
 #
 # Usage:
-#   morning-chain.sh           # run all three steps
+#   morning-chain.sh           # run all six steps
 #   morning-chain.sh --dry-run # print each command without executing
 #
 # Locking: uses flock (Linux / homebrew util-linux) or shlock (macOS /usr/bin/shlock)
 # to ensure at most one invocation of each step runs at a time.
-# Lock files: logs/morning-chain-step{1,2,3}.lock (in MORNING_CHAIN_LOCK_DIR)
+# Lock files: logs/morning-chain-step{1,2,3,4,5,6}.lock (in MORNING_CHAIN_LOCK_DIR)
 #
 # Environment overrides (for testing):
-#   MORNING_CHAIN_STEP1      override step-1 command (default: bin/journal-morning-run.sh)
-#   MORNING_CHAIN_STEP2      override step-2 command (default: python3 .../export_brief.py)
-#   MORNING_CHAIN_STEP3      override step-3 command (default: hermes brief ...)
+#   MORNING_CHAIN_STEP1      override step-1 command (default: todo_store_sync export)
+#   MORNING_CHAIN_STEP2      override step-2 command (default: bin/journal-morning-run.sh)
+#   MORNING_CHAIN_STEP3      override step-3 command (default: todo_store_sync ingest)
+#   MORNING_CHAIN_STEP4      override step-4 command (default: python3 .../export_brief.py)
+#   MORNING_CHAIN_STEP5      override step-5 command (default: commander export_hermes_report.py)
+#   MORNING_CHAIN_STEP6      override step-6 command (default: hermes brief compose --deliver)
 #   MORNING_CHAIN_LOG_DIR    override log directory   (default: <repo>/logs)
 #   MORNING_CHAIN_LOCK_DIR   override lock directory  (default: <repo>/logs)
 
@@ -41,13 +45,19 @@ fi
 # ---------------------------------------------------------------------------
 # Step commands (overridable for tests)
 # ---------------------------------------------------------------------------
-STEP1_CMD="${MORNING_CHAIN_STEP1:-${REPO_ROOT}/bin/journal-morning-run.sh}"
-STEP2_CMD="${MORNING_CHAIN_STEP2:-python3 ${HOME}/perf-coach/scripts/export_brief.py}"
-STEP3_CMD="${MORNING_CHAIN_STEP3:-hermes brief compose --deliver --target 06:00}"
+STEP1_CMD="${MORNING_CHAIN_STEP1:-cd ${REPO_ROOT} && python3 -m services.hermes.todo_store_sync export}"
+STEP2_CMD="${MORNING_CHAIN_STEP2:-${REPO_ROOT}/bin/journal-morning-run.sh}"
+STEP3_CMD="${MORNING_CHAIN_STEP3:-cd ${REPO_ROOT} && python3 -m services.hermes.todo_store_sync ingest}"
+STEP4_CMD="${MORNING_CHAIN_STEP4:-python3 ${HOME}/perf-coach/scripts/export_brief.py}"
+STEP5_CMD="${MORNING_CHAIN_STEP5:-cd ${HOME}/dev/commander && venv/bin/python scripts/export_hermes_report.py}"
+STEP6_CMD="${MORNING_CHAIN_STEP6:-hermes brief compose --deliver --target 06:00}"
 
 STEP1_LOCK="${LOCK_DIR}/morning-chain-step1.lock"
 STEP2_LOCK="${LOCK_DIR}/morning-chain-step2.lock"
 STEP3_LOCK="${LOCK_DIR}/morning-chain-step3.lock"
+STEP4_LOCK="${LOCK_DIR}/morning-chain-step4.lock"
+STEP5_LOCK="${LOCK_DIR}/morning-chain-step5.lock"
+STEP6_LOCK="${LOCK_DIR}/morning-chain-step6.lock"
 
 # ---------------------------------------------------------------------------
 # Kill-switch check — exits 0 silently when the disable file exists
@@ -63,6 +73,9 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   echo "[dry-run] Step 1: ${STEP1_CMD}"
   echo "[dry-run] Step 2: ${STEP2_CMD}"
   echo "[dry-run] Step 3: ${STEP3_CMD}"
+  echo "[dry-run] Step 4: ${STEP4_CMD}"
+  echo "[dry-run] Step 5: ${STEP5_CMD}"
+  echo "[dry-run] Step 6: ${STEP6_CMD}"
   exit 0
 fi
 
@@ -150,5 +163,8 @@ run_step() {
 run_step 1 "${STEP1_LOCK}" "${STEP1_CMD}"
 run_step 2 "${STEP2_LOCK}" "${STEP2_CMD}"
 run_step 3 "${STEP3_LOCK}" "${STEP3_CMD}"
+run_step 4 "${STEP4_LOCK}" "${STEP4_CMD}"
+run_step 5 "${STEP5_LOCK}" "${STEP5_CMD} || true"
+run_step 6 "${STEP6_LOCK}" "${STEP6_CMD}"
 
 log "morning-chain complete"
