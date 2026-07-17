@@ -40,6 +40,7 @@ and it never collects or stores weight/habit data on Hermes's side.
 - User asks "what does my load say for today?" or similar training-talk questions
 - The nightly bedtime check-in cron job fires (see "Bedtime Check-In" below)
 - User wants a quick look at performance scores, today's planned session, or recent weight trend
+- Use this to expand the morning brief's Training/Dev Report section when the user asks follow-ups.
 
 ## Prerequisites
 

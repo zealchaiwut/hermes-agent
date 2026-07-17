@@ -23,6 +23,7 @@ because ``discord.py`` may be absent (or lazily installed) at import time.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
 import os
 from typing import Any, Dict, Optional
@@ -184,6 +185,93 @@ def _read_morning_brief_channel_id() -> str:
     return str(raw or "").strip()
 
 
+def _read_idle_nudge_config() -> dict:
+    """Return the idle-day nudge scheduler configuration from environment variables.
+
+    Keys:
+        enabled — True when BOTH DISCORD_NUDGE_IDLE_HOUR and DISCORD_NUDGE_IDLE_MINUTE are set
+        hour    — int, UTC hour (0-23)
+        minute  — int, UTC minute (0-59)
+
+    Both vars must be set; if either is absent the scheduler does not start.
+    """
+    raw_hour = os.getenv("DISCORD_NUDGE_IDLE_HOUR", "").strip()
+    raw_minute = os.getenv("DISCORD_NUDGE_IDLE_MINUTE", "").strip()
+    if not raw_hour or not raw_minute:
+        return {"enabled": False, "hour": 0, "minute": 0}
+    try:
+        hour = int(raw_hour)
+    except ValueError:
+        return {"enabled": False, "hour": 0, "minute": 0}
+    try:
+        minute = int(raw_minute)
+    except ValueError:
+        return {"enabled": False, "hour": 0, "minute": 0}
+    return {"enabled": True, "hour": hour, "minute": minute}
+
+
+def _read_weekly_nudge_config() -> dict:
+    """Return the weekly reset nudge scheduler configuration from environment variables.
+
+    Keys:
+        enabled — True when DISCORD_NUDGE_WEEKLY_HOUR is set and parseable
+        day     — int, day-of-week (0=Monday … 6=Sunday, default 6)
+        hour    — int, UTC hour (0-23)
+        minute  — int, UTC minute (0-59, default 0)
+
+    DISCORD_NUDGE_WEEKLY_HOUR is required; if absent the scheduler does not start.
+    DISCORD_NUDGE_WEEKLY_MINUTE defaults to 0 when unset.
+    DISCORD_NUDGE_WEEKLY_DAY defaults to 6 (Sunday) when unset.
+    """
+    raw_hour = os.getenv("DISCORD_NUDGE_WEEKLY_HOUR", "").strip()
+    if not raw_hour:
+        return {"enabled": False, "day": 6, "hour": 0, "minute": 0}
+    try:
+        hour = int(raw_hour)
+    except ValueError:
+        return {"enabled": False, "day": 6, "hour": 0, "minute": 0}
+    raw_minute = os.getenv("DISCORD_NUDGE_WEEKLY_MINUTE", "0").strip()
+    try:
+        minute = int(raw_minute)
+    except ValueError:
+        minute = 0
+    raw_day = os.getenv("DISCORD_NUDGE_WEEKLY_DAY", "6").strip()
+    try:
+        day = int(raw_day)
+    except ValueError:
+        day = 6
+    return {"enabled": True, "day": day, "hour": hour, "minute": minute}
+
+
+def _read_stale_nudge_config() -> dict:
+    """Return the stale-todo nudge scheduler configuration from environment variables.
+
+    Keys:
+        enabled — True when DISCORD_NUDGE_STALE_HOUR is set and parseable
+        hour    — int, UTC hour (0-23)
+        minute  — int, UTC minute (0-59, default 0)
+        days    — int, stale threshold in days (default 5)
+    """
+    raw_hour = os.getenv("DISCORD_NUDGE_STALE_HOUR", "").strip()
+    if not raw_hour:
+        return {"enabled": False, "hour": 0, "minute": 0, "days": 5}
+    try:
+        hour = int(raw_hour)
+    except ValueError:
+        return {"enabled": False, "hour": 0, "minute": 0, "days": 5}
+    raw_minute = os.getenv("DISCORD_NUDGE_STALE_MINUTE", "0").strip()
+    try:
+        minute = int(raw_minute)
+    except ValueError:
+        minute = 0
+    raw_days = os.getenv("DISCORD_NUDGE_STALE_DAYS", "5").strip()
+    try:
+        days = int(raw_days)
+    except ValueError:
+        days = 5
+    return {"enabled": True, "hour": hour, "minute": minute, "days": days}
+
+
 class LifeOpsDiscordAdapter(DiscordAdapter):
     """Bundled DiscordAdapter + life_ops schedulers, views, and commands."""
 
@@ -192,6 +280,9 @@ class LifeOpsDiscordAdapter(DiscordAdapter):
         self._bedtime_task: Optional[asyncio.Task] = None
         self._approvals_task: Optional[asyncio.Task] = None
         self._todo_closure_task: Optional[asyncio.Task] = None
+        self._stale_nudge_task: Optional[asyncio.Task] = None
+        self._idle_nudge_task: Optional[asyncio.Task] = None
+        self._weekly_nudge_task: Optional[asyncio.Task] = None
 
     # ── lifecycle wiring ─────────────────────────────────────────────────
 
@@ -201,12 +292,18 @@ class LifeOpsDiscordAdapter(DiscordAdapter):
         self._start_bedtime_scheduler()
         self._start_approvals_scheduler()
         self._start_todo_closure_scheduler()
+        self._start_stale_todo_nudge_scheduler()
+        self._start_idle_day_nudge_scheduler()
+        self._start_weekly_nudge_scheduler()
         await super()._run_post_connect_initialization()
 
     async def cancel_background_tasks(self) -> None:
         await self._cancel_bedtime_task()
         await self._cancel_approvals_task()
         await self._cancel_todo_closure_task()
+        await self._cancel_stale_todo_nudge_task()
+        await self._cancel_idle_day_nudge_task()
+        await self._cancel_weekly_nudge_task()
         await super().cancel_background_tasks()
 
     def _register_slash_commands(self) -> None:
@@ -631,6 +728,448 @@ class LifeOpsDiscordAdapter(DiscordAdapter):
             except asyncio.CancelledError:
                 pass
         self._todo_closure_task = None
+
+    # ── stale-todo nudge scheduler ───────────────────────────────────────
+
+    def _start_stale_todo_nudge_scheduler(self) -> None:
+        """Start the daily stale-todo nudge scheduler if configured.
+
+        Idempotent: a second call while the task is live is a no-op. The
+        loop fires once per day at DISCORD_NUDGE_STALE_HOUR:DISCORD_NUDGE_STALE_MINUTE
+        (UTC), fetches stale todos via get_stale_todos(threshold_days=DISCORD_NUDGE_STALE_DAYS),
+        and posts a TodoClosureView to discord.morning_brief_channel_id.
+        Disabled by default (DISCORD_NUDGE_STALE_HOUR not set).
+        """
+        cfg = _read_stale_nudge_config()
+        if not cfg["enabled"]:
+            logger.debug("[%s] Stale-todo nudge scheduler disabled", self.name)
+            return
+        if self._stale_nudge_task and not self._stale_nudge_task.done():
+            return
+        self._stale_nudge_task = asyncio.create_task(self._stale_todo_nudge_scheduler_loop(cfg))
+        logger.info(
+            "[%s] Stale-todo nudge scheduler started (fire at %02d:%02d UTC, threshold=%d days)",
+            self.name, cfg["hour"], cfg["minute"], cfg["days"],
+        )
+
+    async def _stale_todo_nudge_scheduler_loop(self, cfg: dict) -> None:
+        """Loop indefinitely, firing the stale-todo nudge once per day."""
+        import datetime
+
+        while True:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            target = now_utc.replace(
+                hour=cfg["hour"], minute=cfg["minute"], second=0, microsecond=0
+            )
+            if target <= now_utc:
+                target += datetime.timedelta(days=1)
+            delay = (target - now_utc).total_seconds()
+            logger.debug(
+                "[%s] Stale-todo nudge scheduler: sleeping %.0fs until %s UTC",
+                self.name, delay, target.isoformat(),
+            )
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+
+            try:
+                await self._fire_stale_todo_nudge(cfg["days"])
+            except Exception as exc:
+                logger.error(
+                    "[%s] Stale-todo nudge: unexpected error firing: %s",
+                    self.name, exc,
+                )
+
+    async def _fire_stale_todo_nudge(self, threshold_days: int) -> None:
+        """Post a stale-todo nudge with a TodoClosureView if stale todos exist.
+
+        Skips when:
+        - away mode is active
+        - get_stale_todos() returns an empty list
+        - discord.morning_brief_channel_id is not configured
+        """
+        import datetime
+
+        today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+        try:
+            from plugins.life_ops import away_mode
+            is_away = away_mode.is_away(today_str)
+        except Exception as exc:
+            logger.warning(
+                "[%s] Stale-todo nudge: away_mode check failed (%s); proceeding as not-away",
+                self.name, exc,
+            )
+            is_away = False
+
+        if is_away:
+            logger.info("[%s] Stale-todo nudge skipped — away mode active", self.name)
+            return
+
+        try:
+            from plugins.life_ops import todo_store
+            stale_todos = await asyncio.to_thread(
+                todo_store.get_stale_todos, threshold_days=threshold_days
+            )
+        except Exception as exc:
+            logger.error(
+                "[%s] Stale-todo nudge: failed to read stale todos: %s", self.name, exc,
+            )
+            return
+
+        if not stale_todos:
+            logger.info(
+                "[%s] Stale-todo nudge: no stale todos (threshold=%d days); skipping",
+                self.name, threshold_days,
+            )
+            return
+
+        channel_id = _read_morning_brief_channel_id()
+        if not channel_id or not self._client:
+            logger.warning(
+                "[%s] Stale-todo nudge: discord.morning_brief_channel_id not set; skipping",
+                self.name,
+            )
+            return
+
+        if not _ensure_view_classes():
+            logger.warning(
+                "[%s] Stale-todo nudge: discord.py unavailable; skipping", self.name
+            )
+            return
+
+        try:
+            channel = self._client.get_channel(int(channel_id))
+            if not channel:
+                channel = await self._client.fetch_channel(int(channel_id))
+
+            count = len(stale_todos)
+            content = (
+                f"Still on these? {count} todo(s) haven't moved in {threshold_days}+ days:"
+            )
+            view = TodoClosureView(
+                open_todos=stale_todos,
+                allowed_user_ids=self._allowed_user_ids,
+                allowed_role_ids=self._allowed_role_ids,
+            )
+            msg = await channel.send(content=content, view=view)
+            view._message = msg
+            logger.info(
+                "[%s] Stale-todo nudge posted (%d stale todo(s), threshold=%d days, channel=%s)",
+                self.name, count, threshold_days, channel_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "[%s] Stale-todo nudge: failed to post: %s", self.name, exc,
+            )
+
+    async def _cancel_stale_todo_nudge_task(self) -> None:
+        """Cancel and await the stale-todo nudge scheduler task, if running."""
+        if self._stale_nudge_task and not self._stale_nudge_task.done():
+            self._stale_nudge_task.cancel()
+            try:
+                await self._stale_nudge_task
+            except asyncio.CancelledError:
+                pass
+        self._stale_nudge_task = None
+
+    # ── idle-day nudge scheduler ─────────────────────────────────────────
+
+    def _start_idle_day_nudge_scheduler(self) -> None:
+        """Start the idle-day nudge scheduler if both env vars are configured.
+
+        Idempotent: a second call while the task is live is a no-op. The loop
+        fires once per day at DISCORD_NUDGE_IDLE_HOUR:DISCORD_NUDGE_IDLE_MINUTE
+        (UTC). Both vars must be set; if either is absent the scheduler does not
+        start.
+        """
+        cfg = _read_idle_nudge_config()
+        if not cfg["enabled"]:
+            logger.debug("[%s] Idle-day nudge scheduler disabled", self.name)
+            return
+        if self._idle_nudge_task and not self._idle_nudge_task.done():
+            return
+        self._idle_nudge_task = asyncio.create_task(self._idle_day_nudge_scheduler_loop(cfg))
+        logger.info(
+            "[%s] Idle-day nudge scheduler started (fire at %02d:%02d UTC)",
+            self.name, cfg["hour"], cfg["minute"],
+        )
+
+    async def _idle_day_nudge_scheduler_loop(self, cfg: dict) -> None:
+        """Loop indefinitely, firing the idle-day nudge once per day."""
+        import datetime
+
+        while True:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            target = now_utc.replace(
+                hour=cfg["hour"], minute=cfg["minute"], second=0, microsecond=0
+            )
+            if target <= now_utc:
+                target += datetime.timedelta(days=1)
+            delay = (target - now_utc).total_seconds()
+            logger.debug(
+                "[%s] Idle-day nudge scheduler: sleeping %.0fs until %s UTC",
+                self.name, delay, target.isoformat(),
+            )
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+
+            try:
+                await self._fire_idle_day_nudge()
+            except Exception as exc:
+                logger.error(
+                    "[%s] Idle-day nudge: unexpected error firing: %s",
+                    self.name, exc,
+                )
+
+    async def _fire_idle_day_nudge(self) -> None:
+        """Post an idle-day nudge when all three conditions hold simultaneously.
+
+        Conditions: away mode inactive AND count_todos_closed_today() == 0
+        AND len(get_open_todos()) > 0. Silent skip (no error) otherwise.
+        """
+        import datetime
+
+        today_str = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+        try:
+            from plugins.life_ops import away_mode
+            is_away = away_mode.is_away(today_str)
+        except Exception as exc:
+            logger.warning(
+                "[%s] Idle-day nudge: away_mode check failed (%s); proceeding as not-away",
+                self.name, exc,
+            )
+            is_away = False
+
+        if is_away:
+            logger.info("[%s] Idle-day nudge skipped — away mode active", self.name)
+            return
+
+        try:
+            from plugins.life_ops import todo_store
+            closed_today = await asyncio.to_thread(todo_store.count_todos_closed_today)
+        except Exception as exc:
+            logger.error(
+                "[%s] Idle-day nudge: failed to count closed todos: %s", self.name, exc,
+            )
+            return
+
+        if closed_today > 0:
+            logger.info(
+                "[%s] Idle-day nudge skipped — %d todo(s) already closed today",
+                self.name, closed_today,
+            )
+            return
+
+        try:
+            open_todos = await asyncio.to_thread(todo_store.get_open_todos)
+        except Exception as exc:
+            logger.error(
+                "[%s] Idle-day nudge: failed to read open todos: %s", self.name, exc,
+            )
+            return
+
+        if not open_todos:
+            logger.info("[%s] Idle-day nudge skipped — no open todos", self.name)
+            return
+
+        channel_id = _read_morning_brief_channel_id()
+        if not channel_id or not self._client:
+            logger.warning(
+                "[%s] Idle-day nudge: discord.morning_brief_channel_id not set; skipping",
+                self.name,
+            )
+            return
+
+        if not _ensure_view_classes():
+            logger.warning(
+                "[%s] Idle-day nudge: discord.py unavailable; skipping", self.name
+            )
+            return
+
+        try:
+            channel = self._client.get_channel(int(channel_id))
+            if not channel:
+                channel = await self._client.fetch_channel(int(channel_id))
+
+            view = TodoClosureView(
+                open_todos=open_todos,
+                allowed_user_ids=self._allowed_user_ids,
+                allowed_role_ids=self._allowed_role_ids,
+            )
+            msg = await channel.send(
+                content="Haven't touched your list today — want to review it?",
+                view=view,
+            )
+            view._message = msg
+            logger.info(
+                "[%s] Idle-day nudge posted (%d open todo(s), channel=%s)",
+                self.name, len(open_todos), channel_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "[%s] Idle-day nudge: failed to post: %s", self.name, exc,
+            )
+
+    async def _cancel_idle_day_nudge_task(self) -> None:
+        """Cancel and await the idle-day nudge scheduler task, if running."""
+        if self._idle_nudge_task and not self._idle_nudge_task.done():
+            self._idle_nudge_task.cancel()
+            try:
+                await self._idle_nudge_task
+            except asyncio.CancelledError:
+                pass
+        self._idle_nudge_task = None
+
+    # ── weekly reset nudge scheduler ─────────────────────────────────────
+
+    def _start_weekly_nudge_scheduler(self) -> None:
+        """Start the weekly reset nudge scheduler if configured.
+
+        Idempotent: a second call while the task is live is a no-op. The loop
+        fires once per day at DISCORD_NUDGE_WEEKLY_HOUR:DISCORD_NUDGE_WEEKLY_MINUTE
+        (UTC) and posts a TodoClosureView only on the configured day-of-week
+        (DISCORD_NUDGE_WEEKLY_DAY, 0=Monday…6=Sunday, default 6). Disabled when
+        either DISCORD_NUDGE_WEEKLY_HOUR or DISCORD_NUDGE_WEEKLY_MINUTE is unset.
+        """
+        cfg = _read_weekly_nudge_config()
+        if not cfg["enabled"]:
+            logger.debug("[%s] Weekly reset nudge scheduler disabled", self.name)
+            return
+        if self._weekly_nudge_task and not self._weekly_nudge_task.done():
+            return
+        self._weekly_nudge_task = asyncio.create_task(self._weekly_nudge_scheduler_loop(cfg))
+        logger.info(
+            "[%s] Weekly reset nudge scheduler started (fire at %02d:%02d UTC, day=%d)",
+            self.name, cfg["hour"], cfg["minute"], cfg["day"],
+        )
+
+    async def _weekly_nudge_scheduler_loop(self, cfg: dict) -> None:
+        """Loop indefinitely, firing the weekly reset nudge once per day."""
+        import datetime
+
+        while True:
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            target = now_utc.replace(
+                hour=cfg["hour"], minute=cfg["minute"], second=0, microsecond=0
+            )
+            if target <= now_utc:
+                target += datetime.timedelta(days=1)
+            delay = (target - now_utc).total_seconds()
+            logger.debug(
+                "[%s] Weekly reset nudge scheduler: sleeping %.0fs until %s UTC",
+                self.name, delay, target.isoformat(),
+            )
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+
+            try:
+                await self._fire_weekly_nudge(cfg["day"])
+            except Exception as exc:
+                logger.error(
+                    "[%s] Weekly reset nudge: unexpected error firing: %s",
+                    self.name, exc,
+                )
+
+    async def _fire_weekly_nudge(self, day: int) -> None:
+        """Post a weekly reset nudge with TodoClosureView if conditions are met.
+
+        Skips when:
+        - today's weekday does not match ``day`` (0=Monday…6=Sunday)
+        - away mode is active
+        - get_open_todos() returns an empty list
+        - discord.morning_brief_channel_id is not configured
+
+        When open todos exist, posts: "Weekly reset — {count} open todo(s)"
+        followed by a TodoClosureView.
+        """
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        if now_utc.weekday() != day:
+            logger.debug(
+                "[%s] Weekly reset nudge: today is weekday %d, configured day is %d; skipping",
+                self.name, now_utc.weekday(), day,
+            )
+            return
+
+        today_str = now_utc.date().isoformat()
+        try:
+            from plugins.life_ops import away_mode
+            is_away = away_mode.is_away(today_str)
+        except Exception as exc:
+            logger.warning(
+                "[%s] Weekly reset nudge: away_mode check failed (%s); proceeding as not-away",
+                self.name, exc,
+            )
+            is_away = False
+
+        if is_away:
+            logger.info("[%s] Weekly reset nudge skipped — away mode active", self.name)
+            return
+
+        try:
+            from plugins.life_ops import todo_store
+            open_todos = await asyncio.to_thread(todo_store.get_open_todos)
+        except Exception as exc:
+            logger.error(
+                "[%s] Weekly reset nudge: failed to read open todos: %s", self.name, exc,
+            )
+            return
+
+        if not open_todos:
+            logger.info("[%s] Weekly reset nudge: no open todos; skipping", self.name)
+            return
+
+        channel_id = _read_morning_brief_channel_id()
+        if not channel_id or not self._client:
+            logger.warning(
+                "[%s] Weekly reset nudge: discord.morning_brief_channel_id not set; skipping",
+                self.name,
+            )
+            return
+
+        if not _ensure_view_classes():
+            logger.warning(
+                "[%s] Weekly reset nudge: discord.py unavailable; skipping", self.name
+            )
+            return
+
+        try:
+            channel = self._client.get_channel(int(channel_id))
+            if not channel:
+                channel = await self._client.fetch_channel(int(channel_id))
+
+            count = len(open_todos)
+            content = f"Weekly reset — {count} open todo(s)"
+            view = TodoClosureView(
+                open_todos=open_todos,
+                allowed_user_ids=self._allowed_user_ids,
+                allowed_role_ids=self._allowed_role_ids,
+            )
+            msg = await channel.send(content=content, view=view)
+            view._message = msg
+            logger.info(
+                "[%s] Weekly reset nudge posted (%d open todo(s), channel=%s)",
+                self.name, count, channel_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "[%s] Weekly reset nudge: failed to post: %s", self.name, exc,
+            )
+
+    async def _cancel_weekly_nudge_task(self) -> None:
+        """Cancel and await the weekly reset nudge scheduler task, if running."""
+        task = getattr(self, "_weekly_nudge_task", None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._weekly_nudge_task = None
 
     # ── senders ──────────────────────────────────────────────────────────
 

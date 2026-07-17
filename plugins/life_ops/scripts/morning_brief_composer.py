@@ -63,7 +63,10 @@ _DEFAULT_RENDER_CONFIG = {
         "fields": {"glyph": True, "key": True, "text": True, "recency": True},
         "text_max_chars": 64,
         "header_format": "To-do · {count} open · /done <key>",
-    }
+    },
+    "footer": {
+        "enabled": True,
+    },
 }
 
 DEFAULT_JOURNAL_PATH = str(_CONTRACTS_DIR / "journal_brief.latest.json")
@@ -139,6 +142,13 @@ def load_brief_render_config() -> dict:
 
     if not isinstance(loaded, dict):
         return cfg
+
+    footer_cfg = loaded.get("footer")
+    if isinstance(footer_cfg, dict):
+        enabled = footer_cfg.get("enabled")
+        if enabled is not None:
+            cfg["footer"]["enabled"] = bool(enabled)
+
     todo_cfg = loaded.get("todo_section")
     if not isinstance(todo_cfg, dict):
         return cfg
@@ -381,21 +391,112 @@ def render_session_value(value) -> str:
     return ", ".join(parts) if parts else "—"
 
 
+def _render_v3_form_line(form: dict) -> str:
+    """Render the v3 fitness-metrics form dict as a single Form line."""
+    line = f"**Form:** CTL {form.get('ctl')} · ATL {form.get('atl')} · TSB {form.get('tsb')}"
+    acwr = form.get("acwr")
+    if acwr is not None:
+        line += f" · ACWR {acwr} ({form.get('acwr_state')})"
+    line += f" — {form.get('interpretation')}"
+    return line
+
+
+def _render_v3_weight_line(weight: dict) -> str:
+    """Render the v3 weight tracking dict as a single Weight line."""
+    on_track_str = "on track" if weight.get("on_track") else "off pace"
+    return (
+        f"**Weight:** {weight.get('current_kg')}kg"
+        f" · 7d {weight.get('trend_7d')}"
+        f" · target {weight.get('target_kg')} by {weight.get('target_date')}"
+        f" ({on_track_str})"
+    )
+
+
+def _render_v3_week_plan_block(week_plan: list) -> str:
+    """Render the v3 week_plan list as a heading + one row per day."""
+    rows = ["**Week plan:**"]
+    for entry in week_plan:
+        day = entry.get("day", "")
+        if entry.get("planned"):
+            rows.append(f"· {day}  {entry.get('session_type')} {entry.get('duration_min')}min")
+        else:
+            rows.append(f"· {day}  rest")
+    return "\n".join(rows)
+
+
+def _render_lever(lever: dict) -> str:
+    """Format one lever dict as 'name state [until date]'."""
+    name = lever.get("name", "")
+    state = lever.get("state", "")
+    until = lever.get("until")
+    if until:
+        return f"{name} {state} until {until}"
+    return f"{name} {state}"
+
+
+def _render_coach_block(coach: dict) -> list[str]:
+    """Render the coach sub-block: directive / projection / levers lines."""
+    lines: list[str] = []
+    directive = coach.get("directive")
+    if directive:
+        lines.append(f"**Coach:** {directive}")
+    projection = coach.get("projection")
+    if projection:
+        lines.append(f"_{projection}_")
+    levers = coach.get("levers")
+    if levers is not None:
+        if isinstance(levers, str):
+            lines.append(f"Levers: {levers}")
+        elif isinstance(levers, list):
+            parts = [_render_lever(l) if isinstance(l, dict) else str(l) for l in levers]
+            lines.append(f"Levers: {' · '.join(parts)}")
+    return lines
+
+
 def render_training_section(data: dict | None, reason: str) -> str:
     lines = ["## Section 3 — Training\n"]
     if data is None:
         lines.append(_unavailable_block(reason))
         return "\n".join(lines)
 
+    # Coach block (issue #63) — rendered at the top, before v3 blocks
+    coach = data.get("coach")
+    if isinstance(coach, dict):
+        lines.extend(_render_coach_block(coach))
+
+    # v3 new blocks (AC-1, AC-2, AC-3)
+    v3_blocks: list[str] = []
+
+    form = data.get("form")
+    if isinstance(form, dict):
+        v3_blocks.append(_render_v3_form_line(form))
+
+    weight = data.get("weight")
+    if weight is not None:
+        v3_blocks.append(_render_v3_weight_line(weight))
+
+    week_plan = data.get("week_plan")
+    if isinstance(week_plan, list) and week_plan:
+        v3_blocks.append(_render_v3_week_plan_block(week_plan))
+
+    lines.extend(v3_blocks)
+
     advisories = data.get("advisories")
     if advisories:
+        # AC-4: heading only when at least one new block precedes advisories
+        if v3_blocks:
+            lines.append("**Advisories:**")
         for advisory in advisories:
             lines.append(render_advisory(advisory))
         return "\n".join(lines)
 
-    # Fall back to raw fields
+    # AC-5: Legacy fallback when advisories is absent
+    v3_form_rendered = isinstance(form, dict)
     fallback_parts: list[str] = []
     for field in ("today", "tomorrow", "form", "recent_wrap"):
+        # Skip form when it was already rendered as a v3 fitness-metrics line
+        if field == "form" and v3_form_rendered:
+            continue
         value = data.get(field)
         if not value:
             continue
@@ -403,10 +504,111 @@ def render_training_section(data: dict | None, reason: str) -> str:
 
     if fallback_parts:
         lines.extend(fallback_parts)
-    else:
+    elif not v3_blocks:
         lines.append("> (no training data today)\n")
 
     return "\n".join(lines)
+
+
+_PROJECT_GLYPHS: dict[str, str] = {
+    "shipped": "🚀",
+    "in_progress": "⏳",
+    "blocked": "⛔",
+    "waiting_signoff": "📋",
+    "idle": "💤",
+}
+
+
+def _render_project_header(project: dict) -> str:
+    name = project.get("name", "")
+    status = project.get("status", "")
+    glyph = _PROJECT_GLYPHS.get(status, "")
+
+    header = f"**{name}** — {glyph} {status}"
+
+    if status == "in_progress":
+        ip = project.get("in_progress")
+        if isinstance(ip, dict):
+            sprint_label = ip.get("sprint_label", "")
+            percent = ip.get("percent", "")
+            ticket = ip.get("ticket", "")
+            header += f" ({sprint_label}, {percent}% — {ticket})"
+
+    # compact counts suffix when any bucket is non-empty
+    bucket_counts: list[str] = []
+    for bucket_name in ("shipped", "fixed", "stale", "waiting"):
+        bucket = project.get(bucket_name) or []
+        if bucket:
+            bucket_counts.append(f"{bucket_name[0].upper()}{len(bucket)}")
+    if bucket_counts:
+        header += f" [{' '.join(bucket_counts)}]"
+
+    return header
+
+
+def _render_shipped_item(item) -> str:
+    if not isinstance(item, dict):
+        return f"- {item}"
+    label = item.get("label", "")
+    goal = item.get("goal", "")
+    done = item.get("done", "")
+    pr_number = item.get("pr_number")
+    pr_part = f", PR #{pr_number}" if pr_number is not None else ""
+    return f'- Shipped: {label} "{goal}" ({done} done{pr_part})'
+
+
+def _render_fixed_item(item) -> str:
+    if not isinstance(item, dict):
+        return f"- {item}"
+    issue_number = item.get("issue_number", "")
+    title = item.get("title", "")
+    return f"- Fixed: #{issue_number} {title}"
+
+
+def _render_stale_item(item) -> str:
+    if not isinstance(item, dict):
+        return f"- {item}"
+    kind = item.get("kind", "")
+    if kind == "blocked":
+        issue_number = item.get("issue_number", "")
+        age_days = item.get("age_days", "")
+        type_ = item.get("type", "")
+        title = item.get("title", "")
+        return f"- #{issue_number} blocked {age_days}d ({type_}) — {title}"
+    if kind == "waiting_signoff":
+        label = item.get("label", "")
+        age_days = item.get("age_days", "")
+        return f"- {label} awaiting sign-off {age_days}d"
+    if kind == "backlog":
+        label = item.get("label", "")
+        age_days = item.get("age_days", "")
+        ticket_count = item.get("ticket_count", "")
+        return f"- {label} backlog untouched {age_days}d ({ticket_count} tickets)"
+    # unknown kind — render as much as possible
+    return f"- {item}"
+
+
+def _render_waiting_item(item) -> str:
+    if not isinstance(item, dict):
+        return f"- {item}"
+    label = item.get("label", "")
+    ticket_count = item.get("ticket_count", "")
+    estimated_hours = item.get("estimated_hours")
+    hours_part = f", ~{estimated_hours}h" if estimated_hours is not None else ""
+    return f"- Waiting: {label} sign-off ({ticket_count} tickets{hours_part})"
+
+
+def _render_project_block(project: dict) -> list[str]:
+    lines = [_render_project_header(project)]
+    for bucket_name, renderer in (
+        ("shipped", _render_shipped_item),
+        ("fixed", _render_fixed_item),
+        ("stale", _render_stale_item),
+        ("waiting", _render_waiting_item),
+    ):
+        for item in (project.get(bucket_name) or []):
+            lines.append(renderer(item))
+    return lines
 
 
 def render_dev_report_section(data: dict | None, reason: str) -> str:
@@ -415,6 +617,16 @@ def render_dev_report_section(data: dict | None, reason: str) -> str:
         lines.append(_unavailable_block(reason))
         return "\n".join(lines)
 
+    projects = data.get("projects")
+    if projects:
+        for project in projects:
+            lines.extend(_render_project_block(project))
+
+        cost = data.get("cost", "unknown")
+        lines.append(f"\nCost: {cost}")
+        return "\n".join(lines)
+
+    # Legacy flat path — unchanged
     completed = data.get("completed") or []
     needs_review = data.get("needs_review") or []
     dead_letter = data.get("dead_letter") or []
@@ -473,6 +685,9 @@ def _render_away_marker(for_date: str) -> str:
     return "> 🌙 Away mode on — overnight runs and bedtime prompts are paused.\n"
 
 
+_FOOTER_LINE = '_Dig deeper: reply here — try "sprint details <label>", "why this advisory", "show week plan"._'
+
+
 def compose_brief(
     journal_data: dict | None,
     journal_reason: str,
@@ -483,6 +698,7 @@ def compose_brief(
 ) -> str:
     for_date = (journal_data or {}).get("for_date") or get_today_bangkok()
     away_marker = _render_away_marker(for_date)
+    render_cfg = load_brief_render_config()
 
     sections = [
         "# Morning Brief\n",
@@ -500,6 +716,9 @@ def compose_brief(
             render_dev_report_section(commander_data, commander_reason),
         ]
     )
+    if render_cfg.get("footer", {}).get("enabled", True):
+        sections.append("")
+        sections.append(_FOOTER_LINE)
     return "\n".join(sections)
 
 

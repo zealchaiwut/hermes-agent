@@ -965,3 +965,975 @@ class TestNoForbiddenFieldsInTodoSection:
         # "status" as a rendered field/value, not as an incidental substring
         # of some other word.
         assert "status" not in section.lower()
+
+
+# ---------------------------------------------------------------------------
+# v3 perf-coach contract fixtures (issue #59)
+# ---------------------------------------------------------------------------
+
+def _v3_form(**overrides):
+    base = {
+        "ctl": 45.2,
+        "atl": 43.1,
+        "tsb": 2.1,
+        "acwr": 1.05,
+        "acwr_state": "optimal",
+        "interpretation": "Load balance looks good",
+    }
+    base.update(overrides)
+    return base
+
+
+def _v3_weight(**overrides):
+    base = {
+        "current_kg": 70.5,
+        "trend_7d": "+0.2kg",
+        "target_kg": 68.0,
+        "target_date": "2026-10-01",
+        "on_track": True,
+    }
+    base.update(overrides)
+    return base
+
+
+def _v3_week_plan():
+    return [
+        {"day": "Mon", "planned": True, "session_type": "easy run", "duration_min": 45},
+        {"day": "Tue", "planned": False},
+        {"day": "Wed", "planned": True, "session_type": "intervals", "duration_min": 60},
+    ]
+
+
+def _v3_advisories():
+    return [
+        {"key": "load", "severity": "warn", "text": "High load this week."},
+        {"key": "note", "severity": "info", "text": "Recovery recommended."},
+    ]
+
+
+def _full_v3_data():
+    return _perfcoach_data(
+        form=_v3_form(),
+        weight=_v3_weight(),
+        week_plan=_v3_week_plan(),
+        advisories=_v3_advisories(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC-1  Form line
+# ---------------------------------------------------------------------------
+
+class TestV3FormLine:
+    """AC-1: When data.form is a dict, renders CTL/ATL/TSB line with optional
+    ACWR segment; line omitted when form is missing or not a dict."""
+
+    def test_full_form_line_rendered(self):
+        data = _perfcoach_data(advisories=["adv"], form=_v3_form())
+        section = render_training_section(data, "")
+        assert (
+            "**Form:** CTL 45.2 · ATL 43.1 · TSB 2.1 · ACWR 1.05 (optimal) — Load balance looks good"
+            in section
+        )
+
+    def test_acwr_segment_present_when_acwr_in_form(self):
+        data = _perfcoach_data(advisories=["adv"], form=_v3_form())
+        section = render_training_section(data, "")
+        assert "ACWR 1.05 (optimal)" in section
+
+    def test_acwr_segment_omitted_when_acwr_absent(self):
+        form = {k: v for k, v in _v3_form().items() if k not in ("acwr", "acwr_state")}
+        data = _perfcoach_data(advisories=["adv"], form=form)
+        section = render_training_section(data, "")
+        assert "**Form:** CTL 45.2 · ATL 43.1 · TSB 2.1 — Load balance looks good" in section
+        assert "ACWR" not in section
+
+    def test_form_line_omitted_when_form_key_missing(self):
+        data = _perfcoach_data(advisories=["adv"])
+        section = render_training_section(data, "")
+        assert "**Form:**" not in section
+
+    def test_form_line_omitted_when_form_is_not_dict(self):
+        data = _perfcoach_data(advisories=["adv"], form="Easy run.")
+        section = render_training_section(data, "")
+        assert "**Form:** CTL" not in section
+
+
+# ---------------------------------------------------------------------------
+# AC-2  Weight line
+# ---------------------------------------------------------------------------
+
+class TestV3WeightLine:
+    """AC-2: When data.weight is present, renders weight tracking line;
+    omitted when data.weight is absent."""
+
+    def test_weight_line_on_track_rendered(self):
+        data = _perfcoach_data(advisories=["adv"], weight=_v3_weight(on_track=True))
+        section = render_training_section(data, "")
+        assert (
+            "**Weight:** 70.5kg · 7d +0.2kg · target 68.0 by 2026-10-01 (on track)"
+            in section
+        )
+
+    def test_weight_line_off_pace_rendered(self):
+        data = _perfcoach_data(advisories=["adv"], weight=_v3_weight(on_track=False))
+        section = render_training_section(data, "")
+        assert "(off pace)" in section
+        assert "(on track)" not in section
+
+    def test_weight_line_omitted_when_weight_absent(self):
+        data = _perfcoach_data(advisories=["adv"])
+        section = render_training_section(data, "")
+        assert "**Weight:**" not in section
+
+
+# ---------------------------------------------------------------------------
+# AC-3  Week plan block
+# ---------------------------------------------------------------------------
+
+class TestV3WeekPlanBlock:
+    """AC-3: When data.week_plan is a non-empty list, renders heading + one
+    row per day; block omitted when week_plan is missing or empty."""
+
+    def test_week_plan_heading_rendered(self):
+        data = _perfcoach_data(advisories=["adv"], week_plan=_v3_week_plan())
+        section = render_training_section(data, "")
+        assert "**Week plan:**" in section
+
+    def test_planned_true_day_rendered_with_session(self):
+        data = _perfcoach_data(advisories=["adv"], week_plan=_v3_week_plan())
+        section = render_training_section(data, "")
+        assert "· Mon  easy run 45min" in section
+        assert "· Wed  intervals 60min" in section
+
+    def test_planned_false_day_rendered_as_rest(self):
+        data = _perfcoach_data(advisories=["adv"], week_plan=_v3_week_plan())
+        section = render_training_section(data, "")
+        assert "· Tue  rest" in section
+
+    def test_week_plan_omitted_when_key_missing(self):
+        data = _perfcoach_data(advisories=["adv"])
+        section = render_training_section(data, "")
+        assert "**Week plan:**" not in section
+
+    def test_week_plan_omitted_when_empty_list(self):
+        data = _perfcoach_data(advisories=["adv"], week_plan=[])
+        section = render_training_section(data, "")
+        assert "**Week plan:**" not in section
+
+
+# ---------------------------------------------------------------------------
+# AC-4  Advisories heading
+# ---------------------------------------------------------------------------
+
+class TestV3AdvisoriesHeading:
+    """AC-4: **Advisories:** heading present iff at least one new block
+    (Form, Weight, Week plan) precedes the advisories; absent otherwise."""
+
+    def test_heading_present_when_form_precedes_advisories(self):
+        data = _perfcoach_data(advisories=_v3_advisories(), form=_v3_form())
+        section = render_training_section(data, "")
+        assert "**Advisories:**" in section
+
+    def test_heading_present_when_weight_precedes_advisories(self):
+        data = _perfcoach_data(advisories=_v3_advisories(), weight=_v3_weight())
+        section = render_training_section(data, "")
+        assert "**Advisories:**" in section
+
+    def test_heading_present_when_week_plan_precedes_advisories(self):
+        data = _perfcoach_data(advisories=_v3_advisories(), week_plan=_v3_week_plan())
+        section = render_training_section(data, "")
+        assert "**Advisories:**" in section
+
+    def test_heading_absent_when_no_new_blocks_present(self):
+        """v2 contract: advisories only, no form/weight/week_plan."""
+        data = _perfcoach_data(advisories=_v3_advisories())
+        section = render_training_section(data, "")
+        assert "**Advisories:**" not in section
+        assert "High load this week." in section
+
+    def test_advisories_still_rendered_without_heading_for_v2(self):
+        data = _perfcoach_data(advisories=[{"key": "k", "severity": "info", "text": "Nice one."}])
+        section = render_training_section(data, "")
+        assert "- Nice one." in section
+        assert "**Advisories:**" not in section
+
+
+# ---------------------------------------------------------------------------
+# AC-5  Legacy fallback preserved
+# ---------------------------------------------------------------------------
+
+class TestV3LegacyFallbackPreserved:
+    """AC-5: today/tomorrow/form/recent_wrap rendered via render_session_value
+    when advisories is absent; path is untouched."""
+
+    def test_today_field_still_renders_when_no_advisories(self):
+        data = _perfcoach_data(today={"planned": True, "session_type": "tempo run", "duration_min": 40})
+        section = render_training_section(data, "")
+        assert "**today:** session type: tempo run" in section
+
+    def test_tomorrow_field_still_renders_when_no_advisories(self):
+        data = _perfcoach_data(tomorrow="Long run tomorrow.")
+        section = render_training_section(data, "")
+        assert "**tomorrow:** Long run tomorrow." in section
+
+    def test_recent_wrap_field_still_renders_when_no_advisories(self):
+        data = _perfcoach_data(recent_wrap={"planned": False})
+        section = render_training_section(data, "")
+        assert "**recent_wrap:** Rest / nothing planned" in section
+
+    def test_no_data_at_all_shows_no_training_message(self):
+        data = _perfcoach_data()
+        section = render_training_section(data, "")
+        assert "(no training data today)" in section
+
+
+# ---------------------------------------------------------------------------
+# AC-6  v2 snapshot (byte-identical)
+# ---------------------------------------------------------------------------
+
+class TestV2Snapshot:
+    """AC-6: A v2 contract (advisories only, no form/weight/week_plan keys)
+    produces byte-identical output to the pre-change implementation."""
+
+    _V2_ADVISORIES = [
+        {"key": "run", "severity": "info", "text": "Easy 30-min run."},
+        {"key": "load", "severity": "warn", "text": "High load this week."},
+    ]
+
+    def _expected_v2_output(self):
+        return "\n".join([
+            "## Section 3 — Training\n",
+            "- Easy 30-min run.",
+            "- ⚠️ High load this week.",
+        ])
+
+    def test_v2_contract_output_byte_identical(self):
+        data = _perfcoach_data(advisories=self._V2_ADVISORIES)
+        actual = render_training_section(data, "")
+        assert actual == self._expected_v2_output()
+
+    def test_v2_contract_has_no_advisories_heading(self):
+        data = _perfcoach_data(advisories=self._V2_ADVISORIES)
+        section = render_training_section(data, "")
+        assert "**Advisories:**" not in section
+
+    def test_v2_contract_has_no_form_weight_weekplan_lines(self):
+        data = _perfcoach_data(advisories=self._V2_ADVISORIES)
+        section = render_training_section(data, "")
+        assert "**Form:**" not in section
+        assert "**Weight:**" not in section
+        assert "**Week plan:**" not in section
+
+
+# ---------------------------------------------------------------------------
+# AC-7  v3 integration — full v3 renders Form → Weight → Week plan → Advisories
+# ---------------------------------------------------------------------------
+
+class TestV3Integration:
+    """AC-7: A full v3 fixture with all four fields renders Form → Weight →
+    Week plan → Advisories in that order."""
+
+    def test_all_four_sections_present(self):
+        section = render_training_section(_full_v3_data(), "")
+        assert "**Form:**" in section
+        assert "**Weight:**" in section
+        assert "**Week plan:**" in section
+        assert "**Advisories:**" in section
+
+    def test_order_form_weight_weekplan_advisories(self):
+        section = render_training_section(_full_v3_data(), "")
+        form_pos = section.index("**Form:**")
+        weight_pos = section.index("**Weight:**")
+        weekplan_pos = section.index("**Week plan:**")
+        advisories_pos = section.index("**Advisories:**")
+        assert form_pos < weight_pos < weekplan_pos < advisories_pos
+
+    def test_advisory_content_present(self):
+        section = render_training_section(_full_v3_data(), "")
+        assert "- ⚠️ High load this week." in section
+        assert "- Recovery recommended." in section
+
+    def test_week_plan_rows_present(self):
+        section = render_training_section(_full_v3_data(), "")
+        assert "· Mon  easy run 45min" in section
+        assert "· Tue  rest" in section
+        assert "· Wed  intervals 60min" in section
+
+
+# ---------------------------------------------------------------------------
+# AC-8  Per-block omission (parameterised)
+# ---------------------------------------------------------------------------
+
+class TestV3PerBlockOmission:
+    """AC-8: Each of Form, Weight, and Week plan is independently omitted when
+    its top-level key is missing; the remaining blocks are unaffected."""
+
+    def _data_without(self, *omit_keys):
+        d = _full_v3_data()
+        for key in omit_keys:
+            d.pop(key, None)
+        return d
+
+    def test_form_omitted_weight_and_week_plan_present(self):
+        data = self._data_without("form")
+        section = render_training_section(data, "")
+        assert "**Form:**" not in section
+        assert "**Weight:**" in section
+        assert "**Week plan:**" in section
+        assert "**Advisories:**" in section
+
+    def test_weight_omitted_form_and_week_plan_present(self):
+        data = self._data_without("weight")
+        section = render_training_section(data, "")
+        assert "**Weight:**" not in section
+        assert "**Form:**" in section
+        assert "**Week plan:**" in section
+        assert "**Advisories:**" in section
+
+    def test_week_plan_omitted_form_and_weight_present(self):
+        data = self._data_without("week_plan")
+        section = render_training_section(data, "")
+        assert "**Week plan:**" not in section
+        assert "**Form:**" in section
+        assert "**Weight:**" in section
+        assert "**Advisories:**" in section
+
+    def test_form_omitted_advisories_heading_still_present(self):
+        """Weight + week_plan still trigger the Advisories heading even without form."""
+        data = self._data_without("form")
+        section = render_training_section(data, "")
+        assert "**Advisories:**" in section
+
+    def test_all_three_omitted_no_heading_v2_behaviour(self):
+        """When form/weight/week_plan all absent → no Advisories heading."""
+        data = self._data_without("form", "weight", "week_plan")
+        section = render_training_section(data, "")
+        assert "**Advisories:**" not in section
+        assert "- ⚠️ High load this week." in section
+
+
+# ---------------------------------------------------------------------------
+# Issue #60: Structured commander contract — render_dev_report_section
+# ---------------------------------------------------------------------------
+
+# Helpers for structured project contract fixtures
+
+def _project(name="project-alpha", status="in_progress", **kwargs):
+    """Build a minimal project dict."""
+    p = {"name": name, "status": status}
+    p.update(kwargs)
+    return p
+
+
+def _in_progress_sub(sprint_label="S5", percent=60, ticket="PROJ-12"):
+    return {"sprint_label": sprint_label, "percent": percent, "ticket": ticket}
+
+
+def _shipped_item(label="v1.2", goal="Ship auth", done=3, pr_number=42):
+    return {"label": label, "goal": goal, "done": done, "pr_number": pr_number}
+
+
+def _fixed_item(issue_number=7, title="Fix login crash"):
+    return {"issue_number": issue_number, "title": title}
+
+
+def _stale_blocked(issue_number=9, age_days=5, type="review", title="Auth PR"):
+    return {"kind": "blocked", "issue_number": issue_number, "age_days": age_days,
+            "type": type, "title": title}
+
+
+def _stale_waiting_signoff(label="v1.1", age_days=3):
+    return {"kind": "waiting_signoff", "label": label, "age_days": age_days}
+
+
+def _stale_backlog(label="backlog-A", age_days=10, ticket_count=5):
+    return {"kind": "backlog", "label": label, "age_days": age_days, "ticket_count": ticket_count}
+
+
+def _waiting_item(label="v1.3", ticket_count=4, estimated_hours=8):
+    return {"label": label, "ticket_count": ticket_count, "estimated_hours": estimated_hours}
+
+
+def _commander_projects_data(projects, cost="$0.12", for_date=None):
+    return {
+        "for_date": for_date or _today(),
+        "projects": projects,
+        "cost": cost,
+    }
+
+
+# ---------------------------------------------------------------------------
+# AC-1: projects present → header format with glyph per status
+# ---------------------------------------------------------------------------
+
+class TestProjectsHeaderLine:
+    """AC-1: each project renders **{name}** — {glyph} {status} with correct glyph."""
+
+    _GLYPH_MAP = {
+        "shipped": "🚀",
+        "in_progress": "⏳",
+        "blocked": "⛔",
+        "waiting_signoff": "📋",
+        "idle": "💤",
+    }
+
+    def test_shipped_glyph(self):
+        data = _commander_projects_data([_project("proj", "shipped")])
+        section = render_dev_report_section(data, "")
+        assert "**proj** — 🚀 shipped" in section
+
+    def test_in_progress_glyph(self):
+        data = _commander_projects_data([_project("proj", "in_progress")])
+        section = render_dev_report_section(data, "")
+        assert "**proj** — ⏳ in_progress" in section
+
+    def test_blocked_glyph(self):
+        data = _commander_projects_data([_project("proj", "blocked")])
+        section = render_dev_report_section(data, "")
+        assert "**proj** — ⛔ blocked" in section
+
+    def test_waiting_signoff_glyph(self):
+        data = _commander_projects_data([_project("proj", "waiting_signoff")])
+        section = render_dev_report_section(data, "")
+        assert "**proj** — 📋 waiting_signoff" in section
+
+    def test_idle_glyph(self):
+        data = _commander_projects_data([_project("proj", "idle")])
+        section = render_dev_report_section(data, "")
+        assert "**proj** — 💤 idle" in section
+
+    def test_multiple_projects_each_get_header(self):
+        data = _commander_projects_data([
+            _project("alpha", "in_progress"),
+            _project("beta", "idle"),
+        ])
+        section = render_dev_report_section(data, "")
+        assert "**alpha** — ⏳ in_progress" in section
+        assert "**beta** — 💤 idle" in section
+
+
+# ---------------------------------------------------------------------------
+# AC-2: in_progress header suffix
+# ---------------------------------------------------------------------------
+
+class TestInProgressHeaderSuffix:
+    """AC-2: in_progress header appends (sprint_label, percent% — ticket) when
+    in_progress sub-key present; omitted when sub-key absent."""
+
+    def test_in_progress_suffix_rendered(self):
+        p = _project("proj", "in_progress", in_progress=_in_progress_sub("S5", 60, "PROJ-12"))
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "(S5, 60% — PROJ-12)" in section
+
+    def test_in_progress_suffix_absent_when_sub_key_missing(self):
+        p = _project("proj", "in_progress")
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "**proj** — ⏳ in_progress" in section
+        assert "%" not in section
+
+
+# ---------------------------------------------------------------------------
+# AC-3: compact counts suffix when any bucket non-empty
+# ---------------------------------------------------------------------------
+
+class TestCountsSuffix:
+    """AC-3: compact counts suffix on header line when any bucket non-empty."""
+
+    def test_counts_suffix_present_when_shipped_non_empty(self):
+        p = _project("proj", "in_progress", shipped=[_shipped_item()])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        # Header line contains counts bracket
+        header_line = next(l for l in section.splitlines() if "**proj**" in l)
+        assert "[" in header_line and "]" in header_line
+
+    def test_counts_suffix_absent_for_idle_project(self):
+        p = _project("proj", "idle")
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        header_line = next(l for l in section.splitlines() if "**proj**" in l)
+        assert "[" not in header_line
+
+    def test_counts_suffix_reflects_shipped_count(self):
+        p = _project("proj", "shipped", shipped=[_shipped_item(), _shipped_item("v1.3", "Other", 1, 43)])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        header_line = next(l for l in section.splitlines() if "**proj**" in l)
+        assert "2" in header_line
+
+
+# ---------------------------------------------------------------------------
+# AC-4: shipped bucket sub-bullets
+# ---------------------------------------------------------------------------
+
+class TestShippedBucket:
+    """AC-4: non-empty shipped renders - Shipped: {label} "{goal}" ({done} done, PR #{pr})."""
+
+    def test_shipped_sub_bullet_format(self):
+        p = _project("proj", "shipped", shipped=[_shipped_item("v1.2", "Ship auth", 3, 42)])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert '- Shipped: v1.2 "Ship auth" (3 done, PR #42)' in section
+
+    def test_shipped_string_item_rendered_verbatim(self):
+        p = _project("proj", "shipped", shipped=["verbatim shipped text"])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "- verbatim shipped text" in section
+
+    def test_shipped_missing_pr_number_no_keyerror(self):
+        item = {"label": "v1.0", "goal": "Launch", "done": 1}
+        p = _project("proj", "shipped", shipped=[item])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "v1.0" in section
+        assert "Launch" in section
+
+
+# ---------------------------------------------------------------------------
+# AC-5: fixed bucket sub-bullets
+# ---------------------------------------------------------------------------
+
+class TestFixedBucket:
+    """AC-5: non-empty fixed renders - Fixed: #{issue_number} {title}."""
+
+    def test_fixed_sub_bullet_format(self):
+        p = _project("proj", "shipped", fixed=[_fixed_item(7, "Fix login crash")])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "- Fixed: #7 Fix login crash" in section
+
+    def test_fixed_string_item_rendered_verbatim(self):
+        p = _project("proj", "shipped", fixed=["verbatim fixed text"])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "- verbatim fixed text" in section
+
+
+# ---------------------------------------------------------------------------
+# AC-6: stale bucket — all three kinds
+# ---------------------------------------------------------------------------
+
+class TestStaleBucket:
+    """AC-6: stale renders blocked/waiting_signoff/backlog sub-bullets."""
+
+    def test_stale_blocked_format(self):
+        item = _stale_blocked(9, 5, "review", "Auth PR")
+        p = _project("proj", "blocked", stale=[item])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "#9 blocked 5d (review) — Auth PR" in section
+
+    def test_stale_waiting_signoff_format(self):
+        item = _stale_waiting_signoff("v1.1", 3)
+        p = _project("proj", "waiting_signoff", stale=[item])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "v1.1 awaiting sign-off 3d" in section
+
+    def test_stale_backlog_format(self):
+        item = _stale_backlog("backlog-A", 10, 5)
+        p = _project("proj", "in_progress", stale=[item])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "backlog-A backlog untouched 10d (5 tickets)" in section
+
+    def test_stale_string_item_rendered_verbatim(self):
+        p = _project("proj", "blocked", stale=["stale string item"])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "- stale string item" in section
+
+    def test_stale_mixed_kinds_all_render(self):
+        stale = [
+            _stale_blocked(1, 2, "ci", "CI job"),
+            _stale_waiting_signoff("v0.9", 4),
+            _stale_backlog("tech-debt", 7, 3),
+        ]
+        p = _project("proj", "blocked", stale=stale)
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "#1 blocked 2d (ci) — CI job" in section
+        assert "v0.9 awaiting sign-off 4d" in section
+        assert "tech-debt backlog untouched 7d (3 tickets)" in section
+
+
+# ---------------------------------------------------------------------------
+# AC-7: waiting bucket sub-bullets
+# ---------------------------------------------------------------------------
+
+class TestWaitingBucket:
+    """AC-7: non-empty waiting renders - Waiting: {label} sign-off ({count} tickets, ~{h}h)."""
+
+    def test_waiting_sub_bullet_format(self):
+        p = _project("proj", "waiting_signoff", waiting=[_waiting_item("v1.3", 4, 8)])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "- Waiting: v1.3 sign-off (4 tickets, ~8h)" in section
+
+    def test_waiting_string_item_rendered_verbatim(self):
+        p = _project("proj", "waiting_signoff", waiting=["verbatim waiting text"])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "- verbatim waiting text" in section
+
+    def test_waiting_missing_estimated_hours_no_keyerror(self):
+        item = {"label": "v2.0", "ticket_count": 2}
+        p = _project("proj", "waiting_signoff", waiting=[item])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "v2.0" in section
+        assert "2 tickets" in section
+
+
+# ---------------------------------------------------------------------------
+# AC-8: idle projects collapse to header line only
+# ---------------------------------------------------------------------------
+
+class TestIdleProjectCollapse:
+    """AC-8: idle projects (all buckets empty) render only the header line."""
+
+    def test_idle_project_no_sub_bullets(self):
+        p = _project("proj", "idle")
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        lines = [l for l in section.splitlines() if l.strip().startswith("-")]
+        assert not lines
+
+    def test_idle_project_with_explicitly_empty_buckets_no_sub_bullets(self):
+        p = _project("proj", "idle", shipped=[], fixed=[], stale=[], waiting=[])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        lines = [l for l in section.splitlines() if l.strip().startswith("-")]
+        assert not lines
+
+
+# ---------------------------------------------------------------------------
+# AC-9: dict/string tolerance (render_advisory pattern)
+# ---------------------------------------------------------------------------
+
+class TestBucketItemTolerance:
+    """AC-9: every bucket item accepts dict or plain string."""
+
+    def test_shipped_string_and_dict_both_accepted(self):
+        p = _project("p", "shipped",
+                     shipped=["string item", _shipped_item("v1.0", "Goal", 1, 10)])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "string item" in section
+        assert "v1.0" in section
+
+    def test_stale_string_and_dict_both_accepted(self):
+        p = _project("p", "blocked",
+                     stale=["plain stale", _stale_blocked(3, 1, "review", "Bug")])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "plain stale" in section
+        assert "#3 blocked 1d (review) — Bug" in section
+
+
+# ---------------------------------------------------------------------------
+# AC-10: missing sub-keys default cleanly
+# ---------------------------------------------------------------------------
+
+class TestMissingSubKeysSafe:
+    """AC-10: missing optional sub-keys (in_progress, pr_number, estimated_hours)
+    produce no KeyError."""
+
+    def test_in_progress_sub_key_absent_no_crash(self):
+        p = _project("proj", "in_progress")
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "**proj**" in section
+
+    def test_shipped_missing_pr_number_no_crash(self):
+        p = _project("proj", "shipped", shipped=[{"label": "v1", "goal": "G", "done": 1}])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "v1" in section
+
+    def test_waiting_missing_estimated_hours_no_crash(self):
+        p = _project("proj", "waiting_signoff", waiting=[{"label": "v2", "ticket_count": 3}])
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "v2" in section
+
+    def test_all_project_buckets_absent_no_crash(self):
+        p = {"name": "minimal", "status": "idle"}
+        data = _commander_projects_data([p])
+        section = render_dev_report_section(data, "")
+        assert "**minimal**" in section
+
+
+# ---------------------------------------------------------------------------
+# AC-11: Cost line rendered after all project blocks
+# ---------------------------------------------------------------------------
+
+class TestCostLinePosition:
+    """AC-11: Cost: {cost} line is unchanged and appears after all project blocks."""
+
+    def test_cost_line_present(self):
+        data = _commander_projects_data([_project("p", "idle")], cost="$1.23")
+        section = render_dev_report_section(data, "")
+        assert "Cost: $1.23" in section
+
+    def test_cost_line_after_project_blocks(self):
+        p = _project("proj", "shipped", shipped=[_shipped_item()])
+        data = _commander_projects_data([p], cost="$0.50")
+        section = render_dev_report_section(data, "")
+        proj_pos = section.index("**proj**")
+        cost_pos = section.index("Cost: $0.50")
+        assert proj_pos < cost_pos
+
+
+# ---------------------------------------------------------------------------
+# AC-12: projects absent or empty → flat fallthrough unchanged
+# ---------------------------------------------------------------------------
+
+class TestFlatFallthrough:
+    """AC-12: when data.projects is absent or [], falls through to flat path."""
+
+    def test_no_projects_key_uses_flat_path(self):
+        data = _commander_data(completed=["task-X"], cost="$0.10")
+        section = render_dev_report_section(data, "")
+        assert "task-X" in section
+        assert "**Completed:**" in section
+
+    def test_empty_projects_uses_flat_path(self):
+        data = {
+            "for_date": _today(),
+            "projects": [],
+            "completed": ["task-Y"],
+            "needs_review": [],
+            "dead_letter": [],
+            "cost": "$0.05",
+        }
+        section = render_dev_report_section(data, "")
+        assert "task-Y" in section
+        assert "**Completed:**" in section
+
+    def test_projects_non_empty_ignores_flat_keys(self):
+        """AC-13: both projects and legacy flat keys → projects wins."""
+        data = {
+            "for_date": _today(),
+            "projects": [_project("structured-proj", "idle")],
+            "completed": ["should-be-ignored"],
+            "needs_review": ["also-ignored"],
+            "dead_letter": [],
+            "cost": "$0.01",
+        }
+        section = render_dev_report_section(data, "")
+        assert "**structured-proj**" in section
+        assert "should-be-ignored" not in section
+        assert "also-ignored" not in section
+
+
+# ---------------------------------------------------------------------------
+# AC-14: snapshot test — legacy flat output byte-identical before/after
+# ---------------------------------------------------------------------------
+
+class TestLegacyFlatSnapshot:
+    """AC-14: legacy flat contract produces the same output byte-for-byte."""
+
+    def test_flat_contract_snapshot(self):
+        data = _commander_data(
+            completed=["feature-X shipped", "bug-Y fixed"],
+            needs_review=["PR #42"],
+            dead_letter=["stalled-task-Z"],
+            cost="$1.23",
+        )
+        section = render_dev_report_section(data, "")
+        expected = "\n".join([
+            "## Section 4 — Overnight Dev Report\n",
+            "**Completed:**",
+            "- feature-X shipped",
+            "- bug-Y fixed",
+            "\n**Needs Review:**",
+            "- PR #42",
+            "\n**Dead Letter:**",
+            "- stalled-task-Z",
+            "\nCost: $1.23",
+        ])
+        assert section == expected
+
+
+# ---------------------------------------------------------------------------
+# Issue #63: Coach block in Section 3
+# ---------------------------------------------------------------------------
+
+def _coach_full():
+    return {
+        "directive": "Keep the intensity dialed back this week.",
+        "projection": "On track to hit 70kg by October.",
+        "levers": [
+            {"name": "load", "state": "locked", "until": "31 Jul"},
+            {"name": "weight", "state": "active (measurement)"},
+        ],
+    }
+
+
+class TestCoachBlockSkipping:
+    """AC: render_training_section silently skips coach when absent or not a dict."""
+
+    def test_coach_absent_no_coach_output(self):
+        data = _perfcoach_data(advisories=[{"key": "k", "severity": "info", "text": "adv"}])
+        section = render_training_section(data, "")
+        assert "**Coach:**" not in section
+        assert "Levers:" not in section
+
+    def test_coach_string_silently_skipped(self):
+        data = _perfcoach_data(advisories=[{"key": "k", "severity": "info", "text": "adv"}], coach="invalid")
+        section = render_training_section(data, "")
+        assert "**Coach:**" not in section
+        assert "Levers:" not in section
+
+    def test_coach_int_silently_skipped(self):
+        data = _perfcoach_data(advisories=[{"key": "k", "severity": "info", "text": "adv"}], coach=42)
+        section = render_training_section(data, "")
+        assert "**Coach:**" not in section
+
+    def test_coach_list_silently_skipped(self):
+        data = _perfcoach_data(
+            advisories=[{"key": "k", "severity": "info", "text": "adv"}],
+            coach=[{"directive": "run"}],
+        )
+        section = render_training_section(data, "")
+        assert "**Coach:**" not in section
+
+    def test_malformed_coach_no_exception(self):
+        for bad in ("invalid", 42, [{"directive": "run"}], None):
+            data = _perfcoach_data(advisories=[{"key": "k", "severity": "info", "text": "adv"}], coach=bad)
+            section = render_training_section(data, "")
+            assert "**Coach:**" not in section
+
+
+class TestCoachBlockRendering:
+    """AC: when data.coach is a valid dict, the block renders at the top of Section 3."""
+
+    def test_coach_directive_line_rendered(self):
+        data = _perfcoach_data(coach={"directive": "Easy effort only this week."})
+        section = render_training_section(data, "")
+        assert "**Coach:** Easy effort only this week." in section
+
+    def test_projection_renders_as_italic_after_coach(self):
+        data = _perfcoach_data(coach={"directive": "Easy effort.", "projection": "On track for October."})
+        section = render_training_section(data, "")
+        assert "_On track for October._" in section
+        coach_pos = section.index("**Coach:**")
+        proj_pos = section.index("_On track for October._")
+        assert coach_pos < proj_pos
+
+    def test_projection_absent_no_italic_line(self):
+        data = _perfcoach_data(coach={"directive": "Easy effort."})
+        section = render_training_section(data, "")
+        italic_lines = [l.strip() for l in section.splitlines() if l.strip().startswith("_") and l.strip().endswith("_")]
+        assert len(italic_lines) == 0
+
+    def test_levers_list_of_dicts_rendered_compact(self):
+        levers = [
+            {"name": "load", "state": "locked", "until": "31 Jul"},
+            {"name": "weight", "state": "active (measurement)"},
+        ]
+        data = _perfcoach_data(coach={"directive": "Easy.", "levers": levers})
+        section = render_training_section(data, "")
+        assert "Levers: load locked until 31 Jul · weight active (measurement)" in section
+
+    def test_lever_without_until_no_until_suffix(self):
+        levers = [{"name": "load", "state": "locked"}]
+        data = _perfcoach_data(coach={"directive": "Easy.", "levers": levers})
+        section = render_training_section(data, "")
+        assert "Levers: load locked" in section
+        assert "until" not in section
+
+    def test_lever_with_null_until_no_until_suffix(self):
+        levers = [{"name": "load", "state": "locked", "until": None}]
+        data = _perfcoach_data(coach={"directive": "Easy.", "levers": levers})
+        section = render_training_section(data, "")
+        assert "Levers: load locked" in section
+        assert "until" not in section
+
+    def test_levers_as_string_rendered_verbatim(self):
+        data = _perfcoach_data(coach={"directive": "Easy.", "levers": "pre-formatted lever text"})
+        section = render_training_section(data, "")
+        assert "Levers: pre-formatted lever text" in section
+
+    def test_levers_absent_no_levers_line(self):
+        data = _perfcoach_data(coach={"directive": "Easy effort."})
+        section = render_training_section(data, "")
+        assert "Levers:" not in section
+
+    def test_coach_block_appears_before_form_weight_weekplan(self):
+        data = _perfcoach_data(
+            advisories=[{"key": "k", "severity": "info", "text": "adv"}],
+            form=_v3_form(),
+            weight=_v3_weight(),
+            week_plan=_v3_week_plan(),
+            coach=_coach_full(),
+        )
+        section = render_training_section(data, "")
+        coach_pos = section.index("**Coach:**")
+        form_pos = section.index("**Form:**")
+        weight_pos = section.index("**Weight:**")
+        week_pos = section.index("**Week plan:**")
+        assert coach_pos < form_pos
+        assert coach_pos < weight_pos
+        assert coach_pos < week_pos
+
+    def test_full_coach_block_order_directive_projection_levers(self):
+        data = _perfcoach_data(coach=_coach_full())
+        section = render_training_section(data, "")
+        coach_pos = section.index("**Coach:**")
+        proj_pos = section.index("_On track to hit 70kg by October._")
+        lever_pos = section.index("Levers:")
+        assert coach_pos < proj_pos < lever_pos
+
+    def test_coach_only_directive_no_projection_no_levers(self):
+        data = _perfcoach_data(coach={"directive": "Keep going."})
+        section = render_training_section(data, "")
+        assert "**Coach:** Keep going." in section
+        italic_lines = [l.strip() for l in section.splitlines() if l.strip().startswith("_") and l.strip().endswith("_")]
+        assert len(italic_lines) == 0
+        assert "Levers:" not in section
+
+    def test_coach_missing_levers_no_levers_line(self):
+        data = _perfcoach_data(coach={"directive": "Easy.", "projection": "Looks good."})
+        section = render_training_section(data, "")
+        assert "_Looks good._" in section
+        assert "Levers:" not in section
+
+
+class TestCoachNoCoachSnapshot:
+    """AC: fixture without 'coach' produces byte-identical output to the current baseline."""
+
+    _V2_ADVISORIES = [
+        {"key": "run", "severity": "info", "text": "Easy 30-min run."},
+        {"key": "load", "severity": "warn", "text": "High load this week."},
+    ]
+
+    def test_no_coach_field_v2_output_byte_identical(self):
+        data = _perfcoach_data(advisories=self._V2_ADVISORIES)
+        section = render_training_section(data, "")
+        expected = "\n".join([
+            "## Section 3 — Training\n",
+            "- Easy 30-min run.",
+            "- ⚠️ High load this week.",
+        ])
+        assert section == expected
+
+
+class TestDigDeeperCoachRow:
+    """AC: If plugins/life_ops/docs/dig-deeper.md exists, a Section 3 row referencing
+    the perf-coach skill and GET /api/coach/weekly-message is present."""
+
+    def test_dig_deeper_has_coach_row(self):
+        dig_deeper = Path(__file__).parent.parent / "plugins" / "life_ops" / "docs" / "dig-deeper.md"
+        if not dig_deeper.exists():
+            pytest.skip("dig-deeper.md not found on this branch")
+        content = dig_deeper.read_text(encoding="utf-8")
+        assert "coach directive" in content, "dig-deeper.md missing 'coach directive' in Section 3"
+        assert "GET /api/coach/weekly-message" in content, (
+            "dig-deeper.md missing GET /api/coach/weekly-message in Section 3"
+        )

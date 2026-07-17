@@ -16,6 +16,7 @@ ENDPOINTS = {
     "scores": "/api/scores",
     "today": "/api/plan/today",
     "weight": "/api/weight/recent",
+    "brief": "/api/brief/today",
 }
 
 # Keep tool results small enough to stay well within the model's context
