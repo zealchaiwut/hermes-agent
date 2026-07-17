@@ -708,3 +708,254 @@ class TestSessionRendering:
         assert "{" not in section  # no raw dict repr leaking into output
         assert "session type: tempo run" in section
         assert "**recent_wrap:** Rest / nothing planned" in section
+
+
+# ---------------------------------------------------------------------------
+# Issue #46 — perf-coach contract block in Section 3
+# ---------------------------------------------------------------------------
+
+def _coach_data(directive="Maintain volume.", projection=None, levers=None):
+    coach = {"directive": directive}
+    if projection is not None:
+        coach["projection"] = projection
+    if levers is not None:
+        coach["levers"] = levers
+    return coach
+
+
+class TestTrainingSectionCoachAbsent:
+    """AC1 & AC7: when coach key is absent or not a dict, output is
+    byte-identical to the no-coach snapshot."""
+
+    _ADVISORIES_SNAPSHOT = "## Section 3 — Training\n\n- Easy 30-min run.\n- Focus on form."
+    _FALLBACK_SNAPSHOT = "## Section 3 — Training\n\n**today:** Rest day.\n**tomorrow:** Long run."
+
+    def test_no_coach_key_advisories_byte_identical(self):
+        data = _perfcoach_data(advisories=["Easy 30-min run.", "Focus on form."])
+        assert render_training_section(data, "") == self._ADVISORIES_SNAPSHOT
+
+    def test_no_coach_key_fallback_byte_identical(self):
+        data = _perfcoach_data(today="Rest day.", tomorrow="Long run.")
+        assert render_training_section(data, "") == self._FALLBACK_SNAPSHOT
+
+    def test_coach_none_byte_identical_advisories(self):
+        """AC7: coach=None is silently ignored."""
+        data = _perfcoach_data(advisories=["Easy 30-min run.", "Focus on form."])
+        data["coach"] = None
+        assert render_training_section(data, "") == self._ADVISORIES_SNAPSHOT
+
+    def test_coach_string_byte_identical_advisories(self):
+        """AC7: coach="string" is silently ignored."""
+        data = _perfcoach_data(advisories=["Easy 30-min run.", "Focus on form."])
+        data["coach"] = "not a dict"
+        assert render_training_section(data, "") == self._ADVISORIES_SNAPSHOT
+
+    def test_coach_integer_byte_identical_advisories(self):
+        """AC7: coach=42 is silently ignored."""
+        data = _perfcoach_data(advisories=["Easy 30-min run.", "Focus on form."])
+        data["coach"] = 42
+        assert render_training_section(data, "") == self._ADVISORIES_SNAPSHOT
+
+    def test_coach_list_byte_identical(self):
+        """AC7: coach=[] (not a dict) is silently ignored."""
+        data = _perfcoach_data(advisories=["Easy 30-min run.", "Focus on form."])
+        data["coach"] = []
+        assert render_training_section(data, "") == self._ADVISORIES_SNAPSHOT
+
+
+class TestTrainingSectionCoachBlock:
+    """AC2: **Coach:** line injected at top of Section 3, before existing
+    advisory / fallback lines."""
+
+    def test_coach_line_present_with_advisories(self):
+        data = _perfcoach_data(advisories=["Easy jog."])
+        data["coach"] = _coach_data("Maintain volume, drop intensity.")
+        section = render_training_section(data, "")
+        assert "**Coach:** Maintain volume, drop intensity." in section
+
+    def test_coach_line_before_advisories(self):
+        data = _perfcoach_data(advisories=["Easy jog."])
+        data["coach"] = _coach_data("Maintain volume.")
+        section = render_training_section(data, "")
+        coach_pos = section.index("**Coach:**")
+        advisory_pos = section.index("Easy jog.")
+        assert coach_pos < advisory_pos
+
+    def test_coach_line_before_fallback_fields(self):
+        data = _perfcoach_data(today="Rest day.")
+        data["coach"] = _coach_data("Maintain volume.")
+        section = render_training_section(data, "")
+        coach_pos = section.index("**Coach:**")
+        fallback_pos = section.index("Rest day.")
+        assert coach_pos < fallback_pos
+
+    def test_coach_line_is_first_content_after_header(self):
+        data = _perfcoach_data(advisories=["Easy jog."])
+        data["coach"] = _coach_data("Directive text.")
+        section = render_training_section(data, "")
+        lines = [l for l in section.splitlines() if l.strip()]
+        header_idx = next(i for i, l in enumerate(lines) if l.startswith("##"))
+        first_content = lines[header_idx + 1]
+        assert first_content.startswith("**Coach:**")
+
+    def test_uat_step3_full_coach_block(self):
+        """UAT step 3: full coach dict renders all three lines in correct order."""
+        coach = {
+            "directive": "Maintain volume, drop intensity",
+            "projection": "Peak form by week 6",
+            "levers": [
+                {"name": "load", "state": "locked", "until": "31 Jul"},
+                {"name": "weight", "state": "active", "until": None},
+            ],
+        }
+        data = _perfcoach_data(advisories=["Easy jog."])
+        data["coach"] = coach
+        section = render_training_section(data, "")
+        lines = [l for l in section.splitlines() if l.strip()]
+        content_lines = [l for l in lines if not l.startswith("##")]
+        assert content_lines[0] == "**Coach:** Maintain volume, drop intensity"
+        assert content_lines[1] == "_Peak form by week 6_"
+        assert content_lines[2].startswith("Levers:")
+        assert "load locked until 31 Jul" in content_lines[2]
+        assert "weight active" in content_lines[2]
+
+
+class TestTrainingSectionProjection:
+    """AC3: _{projection}_ rendered only when coach.get('projection') is a
+    non-empty string; omitted otherwise."""
+
+    def test_projection_rendered_when_present(self):
+        data = _perfcoach_data(advisories=[])
+        data["coach"] = _coach_data("Maintain.", projection="Peak form by week 6")
+        section = render_training_section(data, "")
+        assert "_Peak form by week 6_" in section
+
+    def test_projection_immediately_after_coach_line(self):
+        data = _perfcoach_data(advisories=[])
+        data["coach"] = _coach_data("Maintain.", projection="Peak form by week 6")
+        section = render_training_section(data, "")
+        lines = [l for l in section.splitlines() if l.strip()]
+        content = [l for l in lines if not l.startswith("##")]
+        assert content[0].startswith("**Coach:**")
+        assert content[1] == "_Peak form by week 6_"
+
+    def test_projection_absent_when_key_missing(self):
+        """AC3: projection key absent → no projection line."""
+        data = _perfcoach_data(advisories=[])
+        data["coach"] = _coach_data("Maintain.")
+        section = render_training_section(data, "")
+        assert "_" not in section or "Coach" in section  # no italic projection line
+        lines = section.splitlines()
+        assert not any(l.startswith("_") and l.endswith("_") for l in lines)
+
+    def test_projection_absent_when_empty_string(self):
+        """AC3: projection="" (empty) → no projection line."""
+        data = _perfcoach_data(advisories=[])
+        data["coach"] = _coach_data("Maintain.", projection="")
+        section = render_training_section(data, "")
+        lines = section.splitlines()
+        assert not any(l.startswith("_") and l.endswith("_") for l in lines)
+
+    def test_uat_step5_no_projection_levers_present(self):
+        """UAT step 5: projection absent, Levers still present."""
+        coach = {
+            "directive": "Maintain volume",
+            "levers": [{"name": "load", "state": "locked", "until": "31 Jul"}],
+        }
+        data = _perfcoach_data(advisories=[])
+        data["coach"] = coach
+        section = render_training_section(data, "")
+        assert "**Coach:** Maintain volume" in section
+        lines = section.splitlines()
+        assert not any(l.startswith("_") and l.endswith("_") for l in lines)
+        assert any(l.startswith("Levers:") for l in lines)
+
+
+class TestTrainingSectionLevers:
+    """AC4, AC5, AC6: Levers line rendering."""
+
+    def test_levers_list_of_dicts_with_until(self):
+        """AC5: levers as list of dicts renders compact line."""
+        coach = {
+            "directive": "Maintain.",
+            "levers": [
+                {"name": "load", "state": "locked", "until": "31 Jul"},
+                {"name": "weight", "state": "active", "until": None},
+            ],
+        }
+        data = _perfcoach_data(advisories=[])
+        data["coach"] = coach
+        section = render_training_section(data, "")
+        assert "Levers: load locked until 31 Jul · weight active" in section
+
+    def test_levers_string_verbatim(self):
+        """AC5: levers as pre-formatted string is rendered verbatim."""
+        coach = {
+            "directive": "Maintain.",
+            "levers": "load locked until 31 Jul · weight active (measurement)",
+        }
+        data = _perfcoach_data(advisories=[])
+        data["coach"] = coach
+        section = render_training_section(data, "")
+        assert "Levers: load locked until 31 Jul · weight active (measurement)" in section
+
+    def test_levers_absent_omits_line(self):
+        """AC4: no levers key → no Levers line."""
+        data = _perfcoach_data(advisories=[])
+        data["coach"] = _coach_data("Maintain.")
+        section = render_training_section(data, "")
+        assert "Levers:" not in section
+
+    def test_levers_neither_list_nor_string_silently_skipped(self):
+        """AC6: levers value that is neither list nor string → no output, no exception."""
+        coach = {"directive": "Maintain.", "levers": 42}
+        data = _perfcoach_data(advisories=[])
+        data["coach"] = coach
+        section = render_training_section(data, "")
+        assert "Levers:" not in section
+
+    def test_levers_dict_silently_skipped(self):
+        """AC6: levers as dict (not a list) → silently skipped."""
+        coach = {"directive": "Maintain.", "levers": {"name": "bad"}}
+        data = _perfcoach_data(advisories=[])
+        data["coach"] = coach
+        section = render_training_section(data, "")
+        assert "Levers:" not in section
+
+    def test_levers_none_omits_line(self):
+        """AC6/AC4: levers=None → no Levers line."""
+        coach = {"directive": "Maintain.", "levers": None}
+        data = _perfcoach_data(advisories=[])
+        data["coach"] = coach
+        section = render_training_section(data, "")
+        assert "Levers:" not in section
+
+    def test_levers_list_single_item_no_until(self):
+        coach = {"directive": "Maintain.", "levers": [{"name": "load", "state": "locked", "until": None}]}
+        data = _perfcoach_data(advisories=[])
+        data["coach"] = coach
+        section = render_training_section(data, "")
+        assert "Levers: load locked" in section
+        assert "until None" not in section
+
+    def test_levers_list_item_with_until_formats_correctly(self):
+        coach = {
+            "directive": "Maintain.",
+            "levers": [{"name": "weight", "state": "active", "until": "31 Jul"}],
+        }
+        data = _perfcoach_data(advisories=[])
+        data["coach"] = coach
+        section = render_training_section(data, "")
+        assert "Levers: weight active until 31 Jul" in section
+
+    def test_uat_step4_string_levers_no_exception(self):
+        """UAT step 4: string levers → verbatim Levers line, no exception."""
+        coach = {
+            "directive": "Maintain volume, drop intensity",
+            "projection": "Peak form by week 6",
+            "levers": "load locked until 31 Jul · weight active (measurement)",
+        }
+        data = _perfcoach_data(advisories=["Easy jog."])
+        data["coach"] = coach
+        section = render_training_section(data, "")
+        assert "Levers: load locked until 31 Jul · weight active (measurement)" in section
