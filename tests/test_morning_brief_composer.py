@@ -708,3 +708,319 @@ class TestSessionRendering:
         assert "{" not in section  # no raw dict repr leaking into output
         assert "session type: tempo run" in section
         assert "**recent_wrap:** Rest / nothing planned" in section
+
+
+# ---------------------------------------------------------------------------
+# SCHEMA_VERSION 3 — render_training_section extensions (issue #41)
+# ---------------------------------------------------------------------------
+
+def _v3_form(ctl=42.5, atl=38.1, tsb=4.4, acwr=1.1, acwr_state="optimal", interpretation="Good form"):
+    d = {"ctl": ctl, "atl": atl, "tsb": tsb, "interpretation": interpretation}
+    if acwr is not None:
+        d["acwr"] = acwr
+        d["acwr_state"] = acwr_state
+    return d
+
+
+def _v3_weight(current_kg=75.2, trend_7d="-0.3kg", target_kg=73.0, target_date="2026-08-01", on_track=True):
+    return {
+        "current_kg": current_kg,
+        "trend_7d": trend_7d,
+        "target_kg": target_kg,
+        "target_date": target_date,
+        "on_track": on_track,
+    }
+
+
+def _v3_week_plan(with_rest=False):
+    plan = [
+        {"day": "Monday", "planned": True, "session_type": "easy run", "duration_min": 30},
+        {"day": "Tuesday", "planned": True, "session_type": "strength", "duration_min": 45},
+    ]
+    if with_rest:
+        plan.append({"day": "Wednesday", "planned": False})
+    return plan
+
+
+# AC-13 — Snapshot: v2 advisory-only fixture renders byte-identically
+
+class TestV2SnapshotByteIdentical:
+    """AC-13: v2 advisories-only fixture renders byte-identically after the change."""
+
+    _V2_SNAPSHOT = (
+        "## Section 3 — Training\n"
+        "\n"
+        "- Easy 30-min run.\n"
+        "- Focus on form."
+    )
+
+    def test_v2_advisories_only_snapshot(self):
+        data = _perfcoach_data(advisories=["Easy 30-min run.", "Focus on form."])
+        section = render_training_section(data, "")
+        assert section == self._V2_SNAPSHOT
+
+    def test_v2_dict_advisory_snapshot_unchanged(self):
+        data = _perfcoach_data(advisories=[{"key": "load", "severity": "warn", "text": "Back off."}])
+        section = render_training_section(data, "")
+        assert section == "## Section 3 — Training\n\n- ⚠️ Back off."
+
+
+# AC-1, AC-2, AC-3 — Form line rendering
+
+class TestV3FormRendering:
+    """AC-1/2/3: Form line format, ACWR omission, and full-line omission."""
+
+    def test_form_line_with_all_fields_including_acwr(self):
+        data = _perfcoach_data(form=_v3_form())
+        section = render_training_section(data, "")
+        assert "**Form:** CTL 42.5 · ATL 38.1 · TSB 4.4 · ACWR 1.1 (optimal) — Good form" in section
+
+    def test_form_line_acwr_segment_omitted_when_absent(self):
+        form = _v3_form(acwr=None)
+        data = _perfcoach_data(form=form)
+        section = render_training_section(data, "")
+        assert "**Form:** CTL 42.5 · ATL 38.1 · TSB 4.4 — Good form" in section
+        assert "ACWR" not in section
+
+    def test_form_line_omitted_when_form_missing(self):
+        data = _perfcoach_data(weight=_v3_weight())
+        section = render_training_section(data, "")
+        assert "**Form:**" not in section
+
+    def test_form_line_omitted_when_form_is_string(self):
+        # String "form" belongs to the legacy fallback path, not v3
+        data = _perfcoach_data(advisories=[], form="Neutral posture.")
+        section = render_training_section(data, "")
+        assert "**Form:** CTL" not in section
+        # the legacy form string should render via the fallback path
+        assert "Neutral posture." in section
+
+    def test_form_line_omitted_when_form_is_none(self):
+        data = _perfcoach_data(weight=_v3_weight(), form=None)
+        section = render_training_section(data, "")
+        assert "**Form:**" not in section
+
+
+# AC-4, AC-5 — Weight line rendering
+
+class TestV3WeightRendering:
+    """AC-4/5: Weight line format and omission when absent."""
+
+    def test_weight_line_renders_on_track(self):
+        data = _perfcoach_data(weight=_v3_weight(on_track=True))
+        section = render_training_section(data, "")
+        assert "**Weight:** 75.2kg · 7d -0.3kg · target 73.0 by 2026-08-01 (on track)" in section
+
+    def test_weight_line_renders_off_pace(self):
+        data = _perfcoach_data(weight=_v3_weight(on_track=False))
+        section = render_training_section(data, "")
+        assert "(off pace)" in section
+
+    def test_weight_line_omitted_when_absent(self):
+        data = _perfcoach_data(form=_v3_form())
+        section = render_training_section(data, "")
+        assert "**Weight:**" not in section
+
+
+# AC-6, AC-7, AC-8 — Week plan rendering
+
+class TestV3WeekPlanRendering:
+    """AC-6/7/8: Week plan block, planned=False rest row, and omission cases."""
+
+    def test_week_plan_renders_header_and_rows(self):
+        data = _perfcoach_data(week_plan=_v3_week_plan())
+        section = render_training_section(data, "")
+        assert "**Week plan:**" in section
+        assert "· Monday  easy run 30min" in section
+        assert "· Tuesday  strength 45min" in section
+
+    def test_week_plan_planned_false_renders_rest(self):
+        data = _perfcoach_data(week_plan=_v3_week_plan(with_rest=True))
+        section = render_training_section(data, "")
+        assert "· Wednesday  rest" in section
+
+    def test_week_plan_planned_false_no_session_fields(self):
+        plan = [{"day": "Thursday", "planned": False, "session_type": "stale", "duration_min": 999}]
+        data = _perfcoach_data(week_plan=plan)
+        section = render_training_section(data, "")
+        assert "· Thursday  rest" in section
+        assert "stale" not in section
+        assert "999" not in section
+
+    def test_week_plan_omitted_when_missing(self):
+        data = _perfcoach_data(form=_v3_form())
+        section = render_training_section(data, "")
+        assert "**Week plan:**" not in section
+
+    def test_week_plan_omitted_when_empty_list(self):
+        data = _perfcoach_data(form=_v3_form(), week_plan=[])
+        section = render_training_section(data, "")
+        assert "**Week plan:**" not in section
+
+
+# AC-9 — Advisories heading
+
+class TestV3AdvisoriesHeading:
+    """AC-9: Advisories heading present iff at least one v3 block was rendered."""
+
+    def test_advisories_heading_present_when_v3_block_present(self):
+        data = _perfcoach_data(
+            form=_v3_form(),
+            advisories=[{"key": "load", "severity": "warn", "text": "Reduce volume."}],
+        )
+        section = render_training_section(data, "")
+        assert "**Advisories:**" in section
+        assert "- ⚠️ Reduce volume." in section
+
+    def test_advisories_heading_omitted_for_v2_advisories_only(self):
+        # Pure v2: advisories present, no form/weight/week_plan dicts
+        data = _perfcoach_data(advisories=["Run easy."])
+        section = render_training_section(data, "")
+        assert "**Advisories:**" not in section
+        assert "- Run easy." in section
+
+    def test_advisories_heading_omitted_when_advisories_empty_and_v3_blocks(self):
+        # v3 blocks present but no advisories → no Advisories heading
+        data = _perfcoach_data(form=_v3_form(), advisories=[])
+        section = render_training_section(data, "")
+        assert "**Advisories:**" not in section
+
+    def test_advisories_heading_appears_with_weight_block(self):
+        data = _perfcoach_data(weight=_v3_weight(), advisories=["Stay hydrated."])
+        section = render_training_section(data, "")
+        assert "**Advisories:**" in section
+
+    def test_advisories_heading_appears_with_week_plan_block(self):
+        data = _perfcoach_data(week_plan=_v3_week_plan(), advisories=["Easy week."])
+        section = render_training_section(data, "")
+        assert "**Advisories:**" in section
+
+
+# AC-11 — Legacy fallback preserved
+
+class TestV3LegacyFallbackPreserved:
+    """AC-11: today/tomorrow/form(str)/recent_wrap fallback is fully preserved."""
+
+    def test_legacy_fallback_renders_when_advisories_empty(self):
+        data = _perfcoach_data(advisories=[], today="Rest day.", tomorrow="Long run.")
+        section = render_training_section(data, "")
+        assert "**today:** Rest day." in section
+        assert "**tomorrow:** Long run." in section
+        assert "**Advisories:**" not in section
+
+    def test_legacy_fallback_string_form_renders(self):
+        data = _perfcoach_data(advisories=[], form="Neutral posture.")
+        section = render_training_section(data, "")
+        assert "**form:** Neutral posture." in section
+
+    def test_v2_advisories_non_empty_renders_without_heading(self):
+        data = _perfcoach_data(advisories=["Rest well.", "Focus on form."])
+        section = render_training_section(data, "")
+        assert "- Rest well." in section
+        assert "- Focus on form." in section
+        assert "**Advisories:**" not in section
+
+
+# AC-12 — No KeyError on partial v3 contracts
+
+class TestV3PartialContracts:
+    """AC-12: All field access uses .get() — no KeyError on partial v3 contracts."""
+
+    def test_form_partial_missing_interpretation(self):
+        form = {"ctl": 40.0, "atl": 35.0, "tsb": 5.0}  # no interpretation
+        data = _perfcoach_data(form=form)
+        section = render_training_section(data, "")
+        assert "**Form:** CTL 40.0 · ATL 35.0 · TSB 5.0" in section
+
+    def test_form_partial_missing_ctl_atl_tsb(self):
+        form = {"interpretation": "Feeling good"}
+        data = _perfcoach_data(form=form)
+        section = render_training_section(data, "")  # must not raise KeyError
+        assert "**Form:**" in section
+
+    def test_weight_partial_missing_on_track(self):
+        weight = {"current_kg": 70.0, "trend_7d": "+0.1kg", "target_kg": 68.0, "target_date": "2026-09-01"}
+        data = _perfcoach_data(weight=weight)
+        section = render_training_section(data, "")  # must not raise KeyError
+        assert "**Weight:**" in section
+
+    def test_week_plan_partial_missing_duration(self):
+        plan = [{"day": "Friday", "planned": True, "session_type": "swim"}]  # no duration_min
+        data = _perfcoach_data(week_plan=plan)
+        section = render_training_section(data, "")  # must not raise KeyError
+        assert "· Friday" in section
+
+    def test_week_plan_entry_missing_day(self):
+        plan = [{"planned": True, "session_type": "run", "duration_min": 20}]  # no day
+        data = _perfcoach_data(week_plan=plan)
+        section = render_training_section(data, "")  # must not raise KeyError
+        assert "**Week plan:**" in section
+
+
+# AC-14 — Full v3 integration test: order Form → Weight → Week plan → Advisories
+
+class TestV3FullIntegration:
+    """AC-14: Full v3 fixture renders in correct order."""
+
+    def test_full_v3_fixture_section_order(self):
+        data = _perfcoach_data(
+            form=_v3_form(),
+            weight=_v3_weight(),
+            week_plan=_v3_week_plan(),
+            advisories=[{"key": "load", "severity": "info", "text": "Good recovery."}],
+        )
+        section = render_training_section(data, "")
+        form_pos = section.index("**Form:**")
+        weight_pos = section.index("**Weight:**")
+        plan_pos = section.index("**Week plan:**")
+        adv_pos = section.index("**Advisories:**")
+        assert form_pos < weight_pos < plan_pos < adv_pos
+
+    def test_full_v3_fixture_all_content_present(self):
+        data = _perfcoach_data(
+            form=_v3_form(),
+            weight=_v3_weight(),
+            week_plan=_v3_week_plan(with_rest=True),
+            advisories=[{"key": "note", "severity": "info", "text": "Sleep was solid."}],
+        )
+        section = render_training_section(data, "")
+        assert "**Form:**" in section
+        assert "**Weight:**" in section
+        assert "**Week plan:**" in section
+        assert "**Advisories:**" in section
+        assert "- Sleep was solid." in section
+        assert "· Wednesday  rest" in section
+
+
+# AC-15 — Per-block omission tests
+
+class TestV3PerBlockOmission:
+    """AC-15: Omitting form, weight, or week_plan individually produces correct partial output."""
+
+    def test_omit_form_weight_and_week_plan_present(self):
+        data = _perfcoach_data(weight=_v3_weight(), week_plan=_v3_week_plan())
+        section = render_training_section(data, "")
+        assert "**Form:**" not in section
+        assert "**Weight:**" in section
+        assert "**Week plan:**" in section
+
+    def test_omit_weight_form_and_week_plan_present(self):
+        data = _perfcoach_data(form=_v3_form(), week_plan=_v3_week_plan())
+        section = render_training_section(data, "")
+        assert "**Weight:**" not in section
+        assert "**Form:**" in section
+        assert "**Week plan:**" in section
+
+    def test_omit_week_plan_form_and_weight_present(self):
+        data = _perfcoach_data(form=_v3_form(), weight=_v3_weight())
+        section = render_training_section(data, "")
+        assert "**Week plan:**" not in section
+        assert "**Form:**" in section
+        assert "**Weight:**" in section
+
+    def test_week_plan_empty_list_omitted_form_and_weight_present(self):
+        data = _perfcoach_data(form=_v3_form(), weight=_v3_weight(), week_plan=[])
+        section = render_training_section(data, "")
+        assert "**Week plan:**" not in section
+        assert "**Form:**" in section
+        assert "**Weight:**" in section

@@ -214,19 +214,79 @@ def render_session_value(value) -> str:
     return ", ".join(parts) if parts else "—"
 
 
+def _render_form_line(form: dict) -> str:
+    ctl = form.get("ctl", "")
+    atl = form.get("atl", "")
+    tsb = form.get("tsb", "")
+    interpretation = form.get("interpretation", "")
+    parts = f"CTL {ctl} · ATL {atl} · TSB {tsb}"
+    acwr = form.get("acwr")
+    if acwr is not None:
+        acwr_state = form.get("acwr_state", "")
+        parts += f" · ACWR {acwr} ({acwr_state})"
+    parts += f" — {interpretation}"
+    return f"**Form:** {parts}"
+
+
+def _render_weight_line(weight: dict) -> str:
+    current_kg = weight.get("current_kg", "")
+    trend_7d = weight.get("trend_7d", "")
+    target_kg = weight.get("target_kg", "")
+    target_date = weight.get("target_date", "")
+    pace = "on track" if weight.get("on_track") else "off pace"
+    return f"**Weight:** {current_kg}kg · 7d {trend_7d} · target {target_kg} by {target_date} ({pace})"
+
+
 def render_training_section(data: dict | None, reason: str) -> str:
     lines = ["## Section 3 — Training\n"]
     if data is None:
         lines.append(_unavailable_block(reason))
         return "\n".join(lines)
 
+    form = data.get("form")
+    weight = data.get("weight")
+    week_plan = data.get("week_plan")
+
+    has_v3_blocks = (
+        isinstance(form, dict)
+        or weight is not None
+        or bool(week_plan)
+    )
+
+    if has_v3_blocks:
+        if isinstance(form, dict):
+            lines.append(_render_form_line(form))
+
+        if weight is not None:
+            lines.append(_render_weight_line(weight))
+
+        if week_plan:
+            lines.append("**Week plan:**")
+            for entry in week_plan:
+                day = entry.get("day", "")
+                if entry.get("planned") is False:
+                    lines.append(f"· {day}  rest")
+                else:
+                    session_type = entry.get("session_type", "")
+                    duration_min = entry.get("duration_min", "")
+                    lines.append(f"· {day}  {session_type} {duration_min}min")
+
+        advisories = data.get("advisories")
+        if advisories:
+            lines.append("**Advisories:**")
+            for advisory in advisories:
+                lines.append(render_advisory(advisory))
+
+        return "\n".join(lines)
+
+    # v2 path — preserved byte-identically
     advisories = data.get("advisories")
     if advisories:
         for advisory in advisories:
             lines.append(render_advisory(advisory))
         return "\n".join(lines)
 
-    # Fall back to raw fields
+    # Legacy fallback: today / tomorrow / form(str) / recent_wrap
     fallback_parts: list[str] = []
     for field in ("today", "tomorrow", "form", "recent_wrap"):
         value = data.get(field)
