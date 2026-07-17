@@ -40,6 +40,7 @@ and it never collects or stores weight/habit data on Hermes's side.
 - User asks "what does my load say for today?" or similar training-talk questions
 - The nightly bedtime check-in cron job fires (see "Bedtime Check-In" below)
 - User wants a quick look at performance scores, today's planned session, or recent weight trend
+- Use this to expand the morning brief's Training/Dev Report section when the user asks follow-ups.
 
 ## Prerequisites
 
@@ -81,6 +82,7 @@ single read can never blow the context budget.
 | `today` | `GET /api/plan/today` | Today's planned session |
 | `weight` | `GET /api/weight/recent` | Recent weight entries |
 | `bedtime` | combines `training_load` + `today` + `weight` | One-call snapshot for the nightly cron job |
+| `brief` | `GET /api/brief/today` | Morning brief snapshot — expand the brief's Training section |
 
 ## Procedure
 

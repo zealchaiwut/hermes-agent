@@ -164,6 +164,12 @@ python3 scripts/morning_brief_composer.py          # writes ~/.hermes/morning_br
 python3 scripts/morning_brief_composer.py --dry-run  # print to stdout, no file written
 ```
 
+**Section 3 — Training** renders structured SCHEMA_VERSION 3 blocks (form/CTL/ATL/TSB, weight trend, week plan, and advisories) when available, falling back to the legacy format automatically.
+
+**Section 4 — Dev Report** renders a structured commander contract: per-project status glyphs, shipped/fixed/stale/waiting ticket counts, and active-sprint progress.
+
+A **dig-deeper footer** is appended to every brief, surfacing the skill shortcuts (`perf-coach brief`, `commander-api dev_report`, etc.) needed to explore any section further. See [`plugins/life_ops/docs/dig-deeper.md`](plugins/life_ops/docs/dig-deeper.md) for the full follow-up guide.
+
 To deliver the brief automatically to a Discord channel each morning, configure `discord.morning_brief_channel_id` in `~/.hermes/config.yaml` and set `DISCORD_BOT_TOKEN` in `~/.hermes/.env`. See [`cron/README.md`](cron/README.md) for full setup.
 
 ### Discord Bedtime Scheduler
