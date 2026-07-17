@@ -3,6 +3,12 @@
 Each section of the morning brief can be expanded with follow-up commands or skills.
 Reply in the brief thread with any of the prompts below.
 
+## Nudges
+
+Nudge prompts (stale-todo, idle-day, weekly reset) are informational — they
+surface your open todos exactly as the morning brief does, and support the
+same `/done` `/dismiss` `/snooze` follow-ups.
+
 ## Section 2 — Todo List
 
 Manage open todos directly:
