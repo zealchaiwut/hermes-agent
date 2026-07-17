@@ -17,3 +17,6 @@ todo_section:
     recency: true
   text_max_chars: 64
   header_format: "To-do · {count} open · /done <key>"
+
+footer:
+  enabled: true

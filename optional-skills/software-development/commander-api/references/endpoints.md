@@ -238,6 +238,7 @@ routes, `repo` (stripped of the `owner/` prefix) for path-param routes.
 
 | Risk | Method | Path | Purpose |
 |---|---|---|---|
+| SAFE | GET | `/api/dev-report` | Daily dev report across all tracked projects (shortcut: `dev_report`) |
 | SAFE | GET | `/api/projects/{slug}/brief` \| `/api/brief` | Project/home brief |
 | SAFE | GET | `/api/projects/{slug}/brief/summary` \| `/api/brief/summary` | LLM summary (pre-generated) |
 | HIGH-RISK | POST | `.../brief/summary/regenerate`, `.../brief/daily/regenerate` | Regenerate — costs LLM calls |

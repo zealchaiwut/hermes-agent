@@ -68,6 +68,7 @@ Journal approvals: `DISCORD_APPROVALS_HOUR`/`_MINUTE` +
 
 - [`docs/PRODUCT.md`](docs/PRODUCT.md), [`docs/DESIGN.md`](docs/DESIGN.md) — product/design contracts
 - [`docs/morning-brief.md`](docs/morning-brief.md) — morning brief setup
+- [`docs/dig-deeper.md`](docs/dig-deeper.md) — expand any brief section with follow-up commands and skills
 - [`docs/CHANGELOG.md`](docs/CHANGELOG.md) — fork changelog
 
 ## Tests
