@@ -214,11 +214,48 @@ def render_session_value(value) -> str:
     return ", ".join(parts) if parts else "—"
 
 
+def _render_levers(levers) -> str | None:
+    """Return a compact Levers line or None if levers is not renderable."""
+    if isinstance(levers, str):
+        return f"Levers: {levers}"
+    if isinstance(levers, list):
+        parts: list[str] = []
+        for item in levers:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name", "")
+            state = item.get("state", "")
+            until = item.get("until")
+            token = f"{name} {state}".strip()
+            if until:
+                token = f"{token} until {until}"
+            if token:
+                parts.append(token)
+        return f"Levers: {' · '.join(parts)}" if parts else None
+    return None
+
+
 def render_training_section(data: dict | None, reason: str) -> str:
     lines = ["## Section 3 — Training\n"]
     if data is None:
         lines.append(_unavailable_block(reason))
         return "\n".join(lines)
+
+    coach = data.get("coach")
+    coach_lines: list[str] = []
+    if isinstance(coach, dict):
+        directive = coach.get("directive", "")
+        coach_lines.append(f"**Coach:** {directive}")
+        projection = coach.get("projection")
+        if projection and isinstance(projection, str):
+            coach_lines.append(f"_{projection}_")
+        levers = coach.get("levers")
+        if levers is not None:
+            levers_line = _render_levers(levers)
+            if levers_line:
+                coach_lines.append(levers_line)
+
+    lines.extend(coach_lines)
 
     advisories = data.get("advisories")
     if advisories:
@@ -236,7 +273,7 @@ def render_training_section(data: dict | None, reason: str) -> str:
 
     if fallback_parts:
         lines.extend(fallback_parts)
-    else:
+    elif not coach_lines:
         lines.append("> (no training data today)\n")
 
     return "\n".join(lines)
