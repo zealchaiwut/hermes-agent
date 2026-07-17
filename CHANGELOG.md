@@ -8,6 +8,13 @@
 - #51: Add weekly reset nudge with TodoClosureView
 - #52: Wire nudge schedulers into adapter lifecycle and document env vars
 
+## Sprint 2
+
+- #41: Extend render_training_section for SCHEMA_VERSION 3
+- #42: Render structured commander contract in dev report section
+- #43: Add dig-deeper hand-off to morning brief
+- #44: Add commander exporter as morning-chain Step 5
+
 ## Sprint 1.3
 
 - #6: Add M2 morning-brief composer script

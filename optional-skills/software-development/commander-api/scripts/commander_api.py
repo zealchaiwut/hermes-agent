@@ -109,6 +109,12 @@ SHORTCUTS = {
         [],
         "List milestones + which one is active (bare repo name) — check before plan_next",
     ),
+    "dev_report": (
+        "/api/dev-report",
+        [],
+        [],
+        "Morning brief dev report — use to expand the brief's Dev Report section",
+    ),
 }
 
 

@@ -1,4 +1,4 @@
-# Code State — sprint-4
+# Code State — sprint-2
 
 _Deterministic snapshot generated at sprint finish. Do not hand-edit — regenerated each sprint._
 
@@ -10,25 +10,27 @@ _Deterministic snapshot generated at sprint finish. Do not hand-edit — regener
 - **`tests/`** — Pytest test suite (unit and integration)
 - **`docs/`** — Project documentation
 
-## Recent Deltas (sprint-4)
+## Recent Deltas (sprint-2)
 
-Files changed: **7**
+Files changed: **20**
 
+- `optional-skills/` — 5 file(s)
+- `plugins/` — 5 file(s)
+- `tests/` — 5 file(s)
 - `(root)/` — 2 file(s)
-- `plugins/` — 2 file(s)
-- `tests/` — 2 file(s)
-- `services/` — 1 file(s)
+- `deploy/` — 2 file(s)
+- `scripts/` — 1 file(s)
 
 ## Hot Files (last 90 days)
 
 | File | Commits |
 |------|---------|
-| `scripts/release.py` | 1173 |
+| `scripts/release.py` | 1174 |
 | `gateway/run.py` | 701 |
-| `run_agent.py` | 440 |
+| `run_agent.py` | 441 |
 | `hermes_cli/main.py` | 429 |
 | `cli.py` | 380 |
-| `hermes_cli/config.py` | 375 |
+| `hermes_cli/config.py` | 376 |
 | `hermes_cli/web_server.py` | 340 |
 | `tui_gateway/server.py` | 340 |
 | `agent/auxiliary_client.py` | 178 |
@@ -36,9 +38,9 @@ Files changed: **7**
 | `hermes_cli/auth.py` | 161 |
 | `tests/test_tui_gateway_server.py` | 159 |
 | `hermes_cli/kanban_db.py` | 154 |
+| `hermes_state.py` | 138 |
 | `gateway/platforms/telegram.py` | 137 |
 | `cron/scheduler.py` | 136 |
-| `hermes_state.py` | 136 |
 | `agent/conversation_loop.py` | 134 |
 | `gateway/platforms/base.py` | 133 |
 | `tests/hermes_cli/test_web_server.py` | 127 |
@@ -46,6 +48,6 @@ Files changed: **7**
 
 ## Generated
 
-Sprint: `sprint-4`  
-Timestamp: `2026-07-17T09:47:46Z`  
+Sprint: `sprint-2`  
+Timestamp: `2026-07-17T04:39:04Z`  
 _Generated deterministically — no LLM required._
