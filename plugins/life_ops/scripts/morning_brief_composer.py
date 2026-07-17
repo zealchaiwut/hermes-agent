@@ -63,7 +63,10 @@ _DEFAULT_RENDER_CONFIG = {
         "fields": {"glyph": True, "key": True, "text": True, "recency": True},
         "text_max_chars": 64,
         "header_format": "To-do · {count} open · /done <key>",
-    }
+    },
+    "footer": {
+        "enabled": True,
+    },
 }
 
 DEFAULT_JOURNAL_PATH = str(_CONTRACTS_DIR / "journal_brief.latest.json")
@@ -139,6 +142,13 @@ def load_brief_render_config() -> dict:
 
     if not isinstance(loaded, dict):
         return cfg
+
+    footer_cfg = loaded.get("footer")
+    if isinstance(footer_cfg, dict):
+        enabled = footer_cfg.get("enabled")
+        if enabled is not None:
+            cfg["footer"]["enabled"] = bool(enabled)
+
     todo_cfg = loaded.get("todo_section")
     if not isinstance(todo_cfg, dict):
         return cfg
@@ -641,6 +651,9 @@ def _render_away_marker(for_date: str) -> str:
     return "> 🌙 Away mode on — overnight runs and bedtime prompts are paused.\n"
 
 
+_FOOTER_LINE = '_Dig deeper: reply here — try "sprint details <label>", "why this advisory", "show week plan"._'
+
+
 def compose_brief(
     journal_data: dict | None,
     journal_reason: str,
@@ -651,6 +664,7 @@ def compose_brief(
 ) -> str:
     for_date = (journal_data or {}).get("for_date") or get_today_bangkok()
     away_marker = _render_away_marker(for_date)
+    render_cfg = load_brief_render_config()
 
     sections = [
         "# Morning Brief\n",
@@ -668,6 +682,9 @@ def compose_brief(
             render_dev_report_section(commander_data, commander_reason),
         ]
     )
+    if render_cfg.get("footer", {}).get("enabled", True):
+        sections.append("")
+        sections.append(_FOOTER_LINE)
     return "\n".join(sections)
 
 
