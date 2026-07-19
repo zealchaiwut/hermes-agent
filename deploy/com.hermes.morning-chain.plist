@@ -2,9 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Equivalent cron expression (UTC):
-    45 22 * * * /path/to/hermes-agent/deploy/bin/morning-chain.sh
-  That fires at 22:45 UTC = 05:45 Asia/Bangkok (UTC+7) each morning.
+  launchd StartCalendarInterval fires at SYSTEM LOCAL TIME (not UTC).
+  On a Bangkok-TZ host (Asia/Bangkok, UTC+7) this fires at 05:45 ICT each morning.
 -->
 <plist version="1.0">
 <dict>
@@ -18,14 +17,15 @@
   </array>
 
   <!--
-    Fire at 22:45 UTC daily = 05:45 Asia/Bangkok (UTC+7).
+    Fire at 05:45 local time daily (Asia/Bangkok, UTC+7).
+    StartCalendarInterval uses system local time — not UTC.
     Ensure the Mac is already awake before this fires; see deploy/README.md
     for the recommended pmset wakeorpoweron command.
   -->
   <key>StartCalendarInterval</key>
   <dict>
     <key>Hour</key>
-    <integer>22</integer>
+    <integer>5</integer>
     <key>Minute</key>
     <integer>45</integer>
   </dict>
