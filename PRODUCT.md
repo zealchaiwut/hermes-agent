@@ -1,29 +1,32 @@
-# Hermes Agent — Product Overview
+# Hermes Agent — Product
 
-A personal life-ops Discord bot built on the open-source Hermes agent framework, extended via `plugins/life_ops/` (this fork's single owned plugin — see `FORK.md`).
+Personal fork of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent):
+a self-improving personal AI agent that runs one agent core across a CLI/TUI, a
+multi-platform messaging gateway (Telegram, Discord, Slack, …), and a desktop
+app. It learns across sessions (memory + skills), delegates to subagents, runs
+scheduled cron jobs, and drives a real terminal and browser.
 
-## Core Purpose
+## What this fork adds
 
-Deliver a daily morning brief (journal reflection, todos, training status, dev-report across tracked projects) to Discord, and let the operator manage todos and nudges from chat instead of a dashboard.
+- **Life-ops plugin** (`plugins/life_ops/`): a Discord-based daily operations
+  layer — morning brief, bedtime check-in, RPE logging, todo closure views,
+  approvals — wired to the owner's personal stack.
+- **Personal-stack skills** (`optional-skills/`): integrations with
+  **perf-coach** (health/training dashboard) and **commander** (sprint/agent
+  orchestration dashboard) via their HTTP APIs.
+- **Deploy artifacts** (`deploy/`): launchd plists and shell chains
+  (e.g. `com.hermes.morning-chain.plist`, `bin/morning-chain.sh`) for
+  unattended scheduled runs on macOS.
+- Upstream is tracked via periodic `sync/upstream-*` branches; local work goes
+  through the commander sprint flow (`feature/*` → `develop` → `master`).
 
-## Primary User
+## Users
 
-Solo operator (single Discord user/server) — not multi-tenant.
+Single-user (the repo owner). No multi-tenant concerns; secrets live in local
+config/env, never in the repo.
 
-## Key Features
+## Priorities
 
-- **Morning brief chain** (`deploy/bin/morning-chain.sh`, scheduled via launchd at 05:45 Asia/Bangkok): journal fetch/OCR, journal reflection generation, todo sync, perf-coach training export, commander dev-report export, then composed brief delivered to Discord.
-- **Discord slash commands** (`plugins/life_ops/discord_commands.py`): `/done`, `/dismiss`, `/snooze` (todo management), `/away-on`/`/away-off` (pause overnight runs/bedtime prompts).
-- **Nudge schedulers** (`plugins/life_ops/discord_adapter.py`): stale-todo, idle-day, weekly-reset, opt-in via `DISCORD_NUDGE_*` env vars.
-- **Bundled Discord adapter subclass** (`plugins/life_ops/discord_adapter.py`) registered via the upstream `gateway/platform_registry.py` last-writer-wins semantics; upstream files stay pristine.
-
-## Tech Stack
-
-- Python, upstream Hermes agent framework (bundled `DiscordAdapter` base)
-- discord.py-based slash commands (`@tree.command`)
-- Shell scripts for the scheduled morning chain, launchd for scheduling on the deploy machine (zeal-server, mac mini)
-- No database of its own; reads/writes contract JSON files under `~/.hermes/contracts/` produced by other projects (perf-coach, commander) and the journal repo
-
-## Fork Boundary
-
-All fork-owned code lives under `plugins/life_ops/`, `deploy/`, `optional-skills/`, and `tests/`. Everything else is upstream and stays pristine to keep future syncs conflict-free; see `FORK.md`.
+1. Reliability of scheduled life-ops automations (cron, morning chain, bedtime).
+2. Correctness of Discord command handlers and config parsing.
+3. Clean upstream syncs — keep fork-local surface small (plugins/skills, not core).

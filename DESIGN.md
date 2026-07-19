@@ -1,18 +1,44 @@
-# Hermes Agent — Design Reference
+# Hermes Agent — Design
 
-## Discord Slash Command Pattern
+See `AGENTS.md` for the authoritative development guide. This file summarizes
+the architecture for sprint agents (coder/tester) working in this fork.
 
-New commands live in `plugins/life_ops/discord_commands.py`, registered via `@tree.command(name=..., description=...)` and passed the shared `tree` object at plugin setup time (see `done`/`dismiss`/`snooze`/`away-on`/`away-off` for the established pattern).
+## Core principles (from upstream)
 
-- Owner-only commands reuse the existing gate used by `away-on`/`away-off` — do not invent a second gating mechanism.
-- Long-running commands (subprocess-backed) must never block the event loop; run subprocess work off-thread (matching the pattern already used for other subprocess-invoking commands in this file) and report back to the invoking channel/interaction when done.
-- Every mutating or process-invoking command replies to the interaction (ack/defer immediately if the work will take more than a few seconds, then follow up) rather than leaving Discord's interaction hanging.
+- **Per-conversation prompt caching is sacred.** Never mutate past context,
+  swap toolsets, or rebuild the system prompt mid-conversation (only exception:
+  context compression).
+- **The core is a narrow waist; capability lives at the edges.** New capability
+  arrives as a plugin, a CLI command + skill, or a service-gated tool — not as
+  new core tool surface.
 
-## Morning Chain Conventions
+## Layout
 
-- `deploy/bin/morning-chain.sh` is fork-owned and the canonical reference for correct env/PATH handling when invoking journal or brief scripts from a subprocess: it explicitly extends `PATH` to include `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin` before invoking anything that shells out to the `claude` CLI, and uses an `mkdir`-based lock directory (not `flock`, unavailable on macOS) to prevent concurrent runs.
-- Any new on-demand trigger (Discord command or otherwise) that re-runs journal or brief generation must reuse this exact PATH extension and locking approach rather than reimplementing it — the journal repo's real deployed scripts and venv live at its repo root, not any of its Commander-managed `main`/`coder`/`tester`/`uat` clone subdirectories.
+    agent/            agent core (loop, tools, context)
+    gateway/          multi-platform messaging gateway (Discord, Telegram, …)
+    hermes_cli/       CLI/TUI entry points
+    cron/             scheduler: jobs.py, scheduler.py, lifecycle_guard.py,
+                      blueprint/suggestion catalogs
+    plugins/          edge capability; fork-local work concentrates in
+                      plugins/life_ops/ (discord_adapter.py, discord_commands.py,
+                      bedtime.py, config.py)
+    optional-skills/  agentskills.io-style skills, incl. health/perf-coach and
+                      software-development/commander-api
+    deploy/           launchd plists + bin/ shell chains for unattended macOS runs
+    docs/             design notes, contracts (chronos cron contract, relay
+                      connector contract, session lifecycle)
 
-## Contract File Conventions
+## Fork conventions
 
-- Contract files under `~/.hermes/contracts/*.latest.json` are the hand-off format between producer projects (journal, perf-coach, commander) and the composer (`plugins/life_ops/scripts/morning_brief_composer.py`). Additive-only changes are expected; the composer already tolerates missing fields via `.get()` with graceful degrade.
+- Branching: `feature/<N>-<slug>` off `develop`; tester merges to `develop`;
+  human merges `develop` → `master`. Upstream syncs land via `sync/upstream-*`
+  branches — never rebase fork history onto upstream.
+- Keep fork-local diffs at the edges (plugins, skills, deploy). Changing agent
+  core files complicates upstream sync and needs strong justification.
+- Config values are read via `plugins/life_ops/config.py` getters backed by env
+  vars; validate ranges at parse time and fail loudly (logger.error + non-zero
+  exit) rather than silently falling back.
+- launchd `StartCalendarInterval` uses **local time** (Asia/Bangkok on the host),
+  not UTC — comments and docs must not claim otherwise.
+- Tests: pytest under `tests/`; Discord handlers are tested via their pure
+  helper functions where possible (no live gateway in unit tests).
