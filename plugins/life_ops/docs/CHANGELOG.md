@@ -1,5 +1,12 @@
 # Changelog
 
+## Sprint 7.1
+
+- #16: Simplify redundant 'or None' pattern in config getters
+- #17: Clarify lock-busy message to say chain exits, not just one step
+- #29: Correct morning-chain plist StartCalendarInterval to local time (Hour=5, not 22)
+- #30: Validate DISCORD_BEDTIME_HOUR/MINUTE and DISCORD_APPROVALS_HOUR/MINUTE ranges
+
 ## Sprint 5
 
 - #59: Render SCHEMA_VERSION 3 perf-coach contract in morning brief
