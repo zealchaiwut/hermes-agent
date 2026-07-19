@@ -54,13 +54,13 @@ overnight-sprint prompt:
 
 | Variable | Description |
 | --- | --- |
-| `DISCORD_BEDTIME_HOUR` | UTC hour to fire (e.g. `22`) |
-| `DISCORD_BEDTIME_MINUTE` | UTC minute (default `0`) |
+| `DISCORD_BEDTIME_HOUR` | UTC hour to fire, 0–23 (e.g. `22`); out-of-range disables the scheduler |
+| `DISCORD_BEDTIME_MINUTE` | UTC minute, 0–59 (default `0`); out-of-range disables the scheduler |
 | `DISCORD_HOME_CHANNEL` | Discord channel ID to post the prompt |
 | `DISCORD_BEDTIME_TIMEOUT` | Seconds to wait for a click (default `300`) |
 
-Journal approvals: `DISCORD_APPROVALS_HOUR`/`_MINUTE` +
-`JOURNAL_APPROVE_PROJECTS`. Todo-closure view:
+Journal approvals: `DISCORD_APPROVALS_HOUR` (0–23) / `_MINUTE` (0–59) +
+`JOURNAL_APPROVE_PROJECTS`; out-of-range values disable the scheduler with a log warning. Todo-closure view:
 `DISCORD_TODO_CLOSURE_HOUR`/`_MINUTE`. Both post to
 `discord.morning_brief_channel_id`.
 

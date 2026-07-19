@@ -158,7 +158,7 @@ run_step() {
   log "Step ${step_num}: acquiring lock ${lock_file}"
 
   if ! _try_lock "${lock_file}"; then
-    log "Step ${step_num}: lock busy — another invocation is running; skipping"
+    log "Step ${step_num}: lock busy — chain already running; exiting to prevent concurrent execution"
     exit 0
   fi
 

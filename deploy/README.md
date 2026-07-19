@@ -2,8 +2,9 @@
 
 Automates the M5 morning workflow (export todo keys → journal → ingest journal
 contract → perf-coach brief → commander export → hermes delivery) via a launchd
-job that fires at **05:45 Asia/Bangkok (UTC+7)** = **22:45 UTC** the previous
-calendar day.
+job that fires at **05:45 Asia/Bangkok (UTC+7)** local time.
+launchd `StartCalendarInterval` schedules in system local time — on a Bangkok-TZ
+host `Hour=5 Minute=45` fires at 05:45 ICT each morning.
 
 ## Files
 
@@ -38,11 +39,11 @@ journal rather than after it.
 ## 1. Wake the Mac before 05:45
 
 launchd fires at the scheduled time only if the Mac is already awake. Use
-`pmset` to schedule a hardware wake **before** 05:45 Bangkok time (22:45 UTC):
+`pmset` to schedule a hardware wake **before** 05:45 Bangkok local time:
 
 ```bash
-# Wake at 22:40 UTC (= 05:40 Bangkok) every day — 5 minutes before the chain
-sudo pmset repeat wakeorpoweron MTWRFSU 22:40:00
+# Wake at 05:40 local time (Asia/Bangkok) every day — 5 minutes before the chain
+sudo pmset repeat wakeorpoweron MTWRFSU 05:40:00
 ```
 
 To confirm the schedule:
@@ -125,7 +126,7 @@ You should see a line like:
 (The `-` in column 1 means the job is not currently running; `0` is the last
 exit code.)
 
-### Run manually (test without waiting for 22:45 UTC)
+### Run manually (test without waiting for 05:45 local time)
 
 ```bash
 launchctl start com.hermes.morning-chain
