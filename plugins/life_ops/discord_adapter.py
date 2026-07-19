@@ -83,18 +83,29 @@ def _read_bedtime_config() -> dict:
         minute   — int, UTC minute (0-59, default 0)
         timeout  — int, seconds the BedtimeView waits for a click (default 300)
     """
+    _disabled = {"enabled": False, "hour": 0, "minute": 0, "timeout": 300}
     raw_hour = os.getenv("DISCORD_BEDTIME_HOUR", "").strip()
     if not raw_hour:
-        return {"enabled": False, "hour": 0, "minute": 0, "timeout": 300}
+        return _disabled
     try:
         hour = int(raw_hour)
     except ValueError:
-        return {"enabled": False, "hour": 0, "minute": 0, "timeout": 300}
+        return _disabled
+    if not 0 <= hour <= 23:
+        logger.warning(
+            "DISCORD_BEDTIME_HOUR=%r is out of range 0-23; bedtime scheduler disabled", raw_hour
+        )
+        return _disabled
     raw_minute = os.getenv("DISCORD_BEDTIME_MINUTE", "0").strip()
     try:
         minute = int(raw_minute)
     except ValueError:
         minute = 0
+    if not 0 <= minute <= 59:
+        logger.warning(
+            "DISCORD_BEDTIME_MINUTE=%r is out of range 0-59; bedtime scheduler disabled", raw_minute
+        )
+        return _disabled
     raw_timeout = os.getenv("DISCORD_BEDTIME_TIMEOUT", "300").strip()
     try:
         timeout = max(60, int(raw_timeout))
@@ -111,18 +122,29 @@ def _read_approvals_config() -> dict:
         hour    — int, UTC hour (0-23)
         minute  — int, UTC minute (0-59, default 0)
     """
+    _disabled = {"enabled": False, "hour": 0, "minute": 0}
     raw_hour = os.getenv("DISCORD_APPROVALS_HOUR", "").strip()
     if not raw_hour:
-        return {"enabled": False, "hour": 0, "minute": 0}
+        return _disabled
     try:
         hour = int(raw_hour)
     except ValueError:
-        return {"enabled": False, "hour": 0, "minute": 0}
+        return _disabled
+    if not 0 <= hour <= 23:
+        logger.warning(
+            "DISCORD_APPROVALS_HOUR=%r is out of range 0-23; approvals scheduler disabled", raw_hour
+        )
+        return _disabled
     raw_minute = os.getenv("DISCORD_APPROVALS_MINUTE", "0").strip()
     try:
         minute = int(raw_minute)
     except ValueError:
         minute = 0
+    if not 0 <= minute <= 59:
+        logger.warning(
+            "DISCORD_APPROVALS_MINUTE=%r is out of range 0-59; approvals scheduler disabled", raw_minute
+        )
+        return _disabled
     return {"enabled": True, "hour": hour, "minute": minute}
 
 
